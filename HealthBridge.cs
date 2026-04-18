@@ -1,6 +1,5 @@
 #region Using declarations
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
@@ -18,24 +17,24 @@ using NinjaTrader.NinjaScript.AddOns;
 namespace NinjaTrader.NinjaScript.AddOns
 {
     /// <summary>
-    /// HealthBridge - HTTP API for external control of NT8.
-    /// Exposes localhost on configurable port with JSON endpoints so external scripts
-    /// can query account state, positions, and strategies without GUI automation.
+    /// HealthBridge - HTTP API for NT8 health monitoring and broker reconnect.
+    /// Used by the external watchdog to detect stuck UI / broken connections and
+    /// to trigger reconnect via NinjaTrader.Cbi.Connection.Connect(ConnectOptions).
     ///
-    /// Starter endpoints:
-    ///   GET /health       - liveness check
-    ///   GET /accounts     - all accounts with cash, realized/unrealized P&L
-    ///   GET /positions    - all open positions across all accounts
-    ///   GET /connections  - broker connection states
+    /// Scope: health + recovery only. Strategy/backtest endpoints live in a separate AddOn.
     ///
-    /// Extend by adding cases in Dispatch() and matching handler methods.
+    /// Endpoints:
+    ///   GET  /health, /healthz, /runtime_snapshot
+    ///   GET  /accounts, /positions, /connections, /orders, /trades, /daily_pnl
+    ///   POST /recover/reconnect               {"connection_names":[...]}
+    ///   POST /recover/flatten_then_reconnect  flatten all positions then reconnect
+    ///   POST /compile                         {"full":true} for full recompile (reload DLL)
     /// </summary>
     public class HealthBridge : AddOnBase
     {
         private HttpListener _listener;
         private CancellationTokenSource _cts;
         private Task _serverTask;
-        private Thread _workerThread;
         private Thread _heartbeatThread;
         private volatile bool _heartbeatRunning;
         private const int DefaultPort = 8899;
@@ -43,7 +42,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
         // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
         // Format: UTC timestamp at edit time.
-        private const string BuildId = "2026-04-18T18:45:00Z";
+        private const string BuildId = "2026-04-18T19:00:00Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -54,35 +53,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         private static string _lastRecoveryResult = "none";
         private static string _lastRecoveryError = "";
 
-        // ────── Backtest job queue ──────
-        private static readonly ConcurrentDictionary<string, BacktestJob> _jobs =
-            new ConcurrentDictionary<string, BacktestJob>();
-        private static readonly BlockingCollection<BacktestJob> _jobQueue =
-            new BlockingCollection<BacktestJob>();
         private static readonly JavaScriptSerializer _jsonSer = new JavaScriptSerializer();
-
-        private class BacktestRequest
-        {
-            public string strategy_name { get; set; }
-            public string instrument { get; set; }           // e.g. "ES 03-26" or "ES ##-##" continuous
-            public string bars_period_type { get; set; }     // "Minute", "Day", "Tick", "Second", "Week", "Month"
-            public int bars_period_value { get; set; }       // 5 for 5-minute, 1 for 1-day, etc.
-            public string from_date { get; set; }            // yyyy-MM-dd
-            public string to_date { get; set; }              // yyyy-MM-dd
-            public Dictionary<string, object> parameters { get; set; } // optional strategy params
-        }
-
-        private class BacktestJob
-        {
-            public string id;
-            public BacktestRequest request;
-            public string status;       // queued | running | completed | failed
-            public string results_json; // populated when completed
-            public string error;        // populated when failed
-            public DateTime created;
-            public DateTime? completed;
-            public double elapsed_ms;
-        }
 
         protected override void OnStateChange()
         {
@@ -116,11 +87,9 @@ namespace NinjaTrader.NinjaScript.AddOns
                 _listener.Start();
                 _cts = new CancellationTokenSource();
                 _serverTask = Task.Run(() => HandleLoop(_cts.Token));
-                _workerThread = new Thread(BacktestWorkerLoop) { IsBackground = true, Name = "HealthBridge-Worker" };
-                _workerThread.Start();
                 Interlocked.Exchange(ref _lastRequestUtcTicks, DateTime.UtcNow.Ticks);
                 Interlocked.Exchange(ref _lastMainThreadTickUtcTicks, DateTime.UtcNow.Ticks);
-                Log("listening on " + _listenUrl + " (backtest worker started)");
+                Log("listening on " + _listenUrl);
             }
             catch (Exception ex)
             {
@@ -133,7 +102,6 @@ namespace NinjaTrader.NinjaScript.AddOns
             try
             {
                 _cts?.Cancel();
-                _jobQueue.CompleteAdding();
                 if (_listener != null && _listener.IsListening)
                 {
                     _listener.Stop();
@@ -221,26 +189,10 @@ namespace NinjaTrader.NinjaScript.AddOns
                 if (path == "") path = "/";
                 string method = ctx.Request.HttpMethod;
 
-                // ── Path-parametrized routes ──
-                // GET /backtest/{id}  - poll job status/results
-                if (method == "GET" && path.StartsWith("/backtest/"))
-                {
-                    string jobId = path.Substring("/backtest/".Length);
-                    body = GetBacktestJobJson(jobId);
-                }
-                // POST /backtest  - run backtest synchronously (blocks until complete)
-                else if (method == "POST" && path == "/backtest")
-                {
-                    body = RunBacktestSync(ctx.Request);
-                }
-                // POST /strategy_write  - write a .cs file to Strategies folder
-                else if (method == "POST" && path == "/strategy_write")
-                {
-                    body = WriteStrategyFile(ctx.Request);
-                }
-                // POST /compile  - trigger NinjaScript compile, return diagnostics
-                // Body: {"full": true} for full compile (reloads DLL), default is check-only
-                else if (method == "POST" && path == "/compile")
+                // POST /compile — recompile NinjaScript so edits to this AddOn take effect
+                // without restarting NT. Body: {"full": true} for full compile (reloads DLL),
+                // default check-only.
+                if (method == "POST" && path == "/compile")
                 {
                     bool fullCompile = false;
                     try
@@ -248,35 +200,9 @@ namespace NinjaTrader.NinjaScript.AddOns
                         string reqBody = new System.IO.StreamReader(ctx.Request.InputStream).ReadToEnd();
                         if (!string.IsNullOrEmpty(reqBody) && reqBody.Contains("\"full\""))
                             fullCompile = reqBody.Contains("\"full\":true") || reqBody.Contains("\"full\": true");
-                    } catch { }
+                    }
+                    catch { }
                     body = CompileNinjaScript(fullCompile);
-                }
-                // GET /strategy_source/{name}  - read .cs file content
-                else if (method == "GET" && path.StartsWith("/strategy_source/"))
-                {
-                    string name = path.Substring("/strategy_source/".Length);
-                    body = ReadStrategyFile(name);
-                }
-                // GET /backtests  - list all jobs
-                else if (method == "GET" && path == "/backtests")
-                {
-                    body = ListBacktestJobsJson();
-                }
-                else if (method == "GET" && path == "/windows")
-                {
-                    body = ListWindowsJson();
-                }
-                else if (method == "GET" && path == "/sa_diag")
-                {
-                    body = GetSADiagJson();
-                }
-                else if (method == "GET" && path == "/strategies")
-                {
-                    body = ListStrategiesJson();
-                }
-                else if (method == "GET" && path == "/strategy_runtime")
-                {
-                    body = GetStrategyRuntimeJson();
                 }
                 else if (method == "GET" && path == "/healthz")
                 {
@@ -605,57 +531,6 @@ namespace NinjaTrader.NinjaScript.AddOns
             return sb.ToString();
         }
 
-        // ────── Diagnostics ──────
-
-        private string ListWindowsJson()
-        {
-            var sb = new StringBuilder("[");
-            bool first = true;
-            var disp = NinjaTrader.Core.Globals.MainThreadDispatcher;
-            disp.Invoke(new Action(() =>
-            {
-                foreach (var w in NinjaTrader.Core.Globals.AllWindows)
-                {
-                    if (!first) sb.Append(",");
-                    sb.Append("{");
-                    sb.Append("\"type\":\"").Append(JsonEscape(w.GetType().FullName)).Append("\",");
-                    try { sb.Append("\"title\":\"").Append(JsonEscape(w.Title ?? "")).Append("\""); }
-                    catch { sb.Append("\"title\":null"); }
-                    sb.Append("}");
-                    first = false;
-                }
-            }));
-            sb.Append("]");
-            return sb.ToString();
-        }
-
-        private string ListStrategiesJson()
-        {
-            // Walk all loaded assemblies, find types in NinjaTrader.NinjaScript.Strategies that derive from Strategy
-            var sb = new StringBuilder("[");
-            bool first = true;
-            var strategyBase = typeof(NinjaTrader.NinjaScript.Strategies.Strategy);
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                Type[] types;
-                try { types = asm.GetTypes(); }
-                catch (System.Reflection.ReflectionTypeLoadException ex) { types = ex.Types; }
-                catch { continue; }
-                foreach (var t in types)
-                {
-                    if (t == null) continue;
-                    if (!t.IsClass || t.IsAbstract || !t.IsPublic) continue;
-                    if (t.Namespace != "NinjaTrader.NinjaScript.Strategies") continue;
-                    if (!strategyBase.IsAssignableFrom(t)) continue;
-                    if (!first) sb.Append(",");
-                    sb.Append("{\"name\":\"").Append(JsonEscape(t.Name)).Append("\",\"assembly\":\"").Append(JsonEscape(asm.GetName().Name)).Append("\"}");
-                    first = false;
-                }
-            }
-            sb.Append("]");
-            return sb.ToString();
-        }
-
         private string GetHealthzJson()
         {
             var nowUtc = DateTime.UtcNow;
@@ -834,80 +709,6 @@ namespace NinjaTrader.NinjaScript.AddOns
             return sb.ToString();
         }
 
-        private string GetStrategyRuntimeJson()
-        {
-            var sb = new StringBuilder("{");
-            int total = 0;
-            int active = 0;
-            bool foundCollection = false;
-            string strategyItemsJson = "[]";
-            string err;
-            bool ok = InvokeOnMainThreadWithTimeout(() =>
-            {
-                object controlCenter = null;
-                foreach (var w in NinjaTrader.Core.Globals.AllWindows)
-                {
-                    var fullName = w.GetType().FullName ?? "";
-                    if (fullName.IndexOf("ControlCenter", StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        controlCenter = w;
-                        break;
-                    }
-                }
-                if (controlCenter == null)
-                    return;
-
-                object source = null;
-                object vm;
-                if (TryGetPropertyValue(controlCenter, "ViewModel", out vm) && vm != null)
-                {
-                    if (!TryGetPropertyValue(vm, "Strategies", out source) || source == null)
-                        TryGetPropertyValue(vm, "StrategyRows", out source);
-                }
-                if (source == null)
-                {
-                    if (!TryGetPropertyValue(controlCenter, "Strategies", out source) || source == null)
-                        TryGetPropertyValue(controlCenter, "StrategyRows", out source);
-                }
-                if (source == null)
-                    return;
-
-                var enumerable = source as System.Collections.IEnumerable;
-                if (enumerable == null)
-                    return;
-                foundCollection = true;
-
-                var arr = new StringBuilder("[");
-                bool first = true;
-                foreach (var row in enumerable)
-                {
-                    if (row == null) continue;
-                    total++;
-                    bool isEnabled = GetAnyBooleanProperty(row, new[] { "IsEnabled", "Enabled", "IsActive", "IsRunning" });
-                    if (isEnabled) active++;
-                    if (!first) arr.Append(",");
-                    arr.Append("{");
-                    arr.Append("\"name\":\"").Append(JsonEscape(GetAnyStringProperty(row, new[] { "Name", "DisplayName", "Strategy", "StrategyName" }))).Append("\",");
-                    arr.Append("\"account\":\"").Append(JsonEscape(GetAnyStringProperty(row, new[] { "AccountName", "Account", "AccountDisplayName" }))).Append("\",");
-                    arr.Append("\"instrument\":\"").Append(JsonEscape(GetAnyStringProperty(row, new[] { "Instrument", "InstrumentName", "InstrumentDisplayName" }))).Append("\",");
-                    arr.Append("\"template\":\"").Append(JsonEscape(GetAnyStringProperty(row, new[] { "Template", "TemplateName", "AtmStrategyTemplate" }))).Append("\",");
-                    arr.Append("\"state\":\"").Append(JsonEscape(GetAnyStringProperty(row, new[] { "State", "Status" }))).Append("\",");
-                    arr.Append("\"is_enabled\":").Append(isEnabled ? "true" : "false");
-                    arr.Append("}");
-                    first = false;
-                }
-                arr.Append("]");
-                strategyItemsJson = arr.ToString();
-            }, 3000, out err);
-
-            sb.Append("\"collection_found\":").Append(foundCollection ? "true" : "false").Append(",");
-            sb.Append("\"active_count\":").Append(active).Append(",");
-            sb.Append("\"total_count\":").Append(total).Append(",");
-            sb.Append("\"strategies\":").Append(strategyItemsJson).Append(",");
-            sb.Append("\"error\":\"").Append(ok ? "" : JsonEscape(err)).Append("\"");
-            sb.Append("}");
-            return sb.ToString();
-        }
 
         private string GetRuntimeSnapshotJson()
         {
@@ -915,7 +716,6 @@ namespace NinjaTrader.NinjaScript.AddOns
             sb.Append("\"generated_utc\":\"").Append(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")).Append("\",");
             sb.Append("\"health\":").Append(GetHealthzJson()).Append(",");
             sb.Append("\"connections\":").Append(GetConnectionsJson()).Append(",");
-            sb.Append("\"strategy_runtime\":").Append(GetStrategyRuntimeJson()).Append(",");
             int blockingCount;
             sb.Append("\"blocking_windows\":").Append(GetBlockingWindowsJson(out blockingCount)).Append(",");
             sb.Append("\"blocking_windows_count\":").Append(blockingCount).Append(",");
@@ -1147,131 +947,6 @@ namespace NinjaTrader.NinjaScript.AddOns
             return sb.ToString();
         }
 
-        private string GetSADiagJson()
-        {
-            var sb = new StringBuilder("{");
-            try
-            {
-                var lookupDisp = NinjaTrader.Core.Globals.MainThreadDispatcher;
-                object saWindow = null;
-                lookupDisp.Invoke(new Action(() => {
-                    foreach (var w in NinjaTrader.Core.Globals.AllWindows)
-                        if (w.GetType().FullName == "NinjaTrader.Gui.NinjaScript.StrategyAnalyzer.StrategyAnalyzer")
-                        { saWindow = w; return; }
-                }));
-                if (saWindow == null) return "{\"error\":\"SA not open\"}";
-
-                var disp = ((System.Windows.Threading.DispatcherObject)saWindow).Dispatcher;
-                disp.Invoke(new Action(() => {
-                    try {
-                        var vm = saWindow.GetType().GetProperty("ViewModel").GetValue(saWindow, null);
-                        var tab = vm.GetType().GetProperty("SelectedTab").GetValue(vm, null);
-                        var props = tab.GetType().GetProperty("TabStrategyProperties").GetValue(tab, null);
-                        var template = props.GetType().GetProperty("StrategyTemplate").GetValue(props, null);
-
-                        sb.Append("\"tab_NeedsStrategyRerun\":").Append(tab.GetType().GetProperty("NeedsStrategyRerun").GetValue(tab, null)).Append(",");
-                        sb.Append("\"tab_IsProgressVisible\":").Append(tab.GetType().GetProperty("IsProgressVisible").GetValue(tab, null)).Append(",");
-                        sb.Append("\"tab_IsRunVisible\":").Append(tab.GetType().GetProperty("IsRunVisible").GetValue(tab, null)).Append(",");
-                        sb.Append("\"tab_IsRunningDetailsRun\":").Append(tab.GetType().GetProperty("IsRunningDetailsRun").GetValue(tab, null)).Append(",");
-                        var results = tab.GetType().GetProperty("Results").GetValue(tab, null);
-                        sb.Append("\"tab_Results_Count\":").Append(results.GetType().GetProperty("Count").GetValue(results, null)).Append(",");
-                        var selRes = tab.GetType().GetProperty("SelectedResult").GetValue(tab, null);
-                        sb.Append("\"tab_SelectedResult_null\":").Append(selRes == null ? "true" : "false").Append(",");
-                        sb.Append("\"props_Strategy\":\"").Append(JsonEscape((string)props.GetType().GetProperty("Strategy").GetValue(props, null) ?? "")).Append("\",");
-                        sb.Append("\"props_InstrumentOrInstrumentList\":\"").Append(JsonEscape((string)props.GetType().GetProperty("InstrumentOrInstrumentList").GetValue(props, null) ?? "")).Append("\",");
-                        sb.Append("\"props_SelectedRunGuid\":\"").Append(JsonEscape((string)props.GetType().GetProperty("SelectedRunGuid").GetValue(props, null) ?? "")).Append("\",");
-                        if (template != null) {
-                            sb.Append("\"template_State\":\"").Append(template.GetType().GetProperty("State").GetValue(template, null)).Append("\",");
-                            var sp = template.GetType().GetProperty("SystemPerformance").GetValue(template, null);
-                            if (sp != null) {
-                                var at = sp.GetType().GetProperty("AllTrades").GetValue(sp, null);
-                                int tcount = (int)at.GetType().GetProperty("Count").GetValue(at, null);
-                                sb.Append("\"template_TradeCount\":").Append(tcount).Append(",");
-                            } else sb.Append("\"template_SystemPerformance_null\":true,");
-                            sb.Append("\"template_From\":\"").Append(((DateTime)template.GetType().GetProperty("From").GetValue(template, null)).ToString("yyyy-MM-dd")).Append("\",");
-                            sb.Append("\"template_To\":\"").Append(((DateTime)template.GetType().GetProperty("To").GetValue(template, null)).ToString("yyyy-MM-dd")).Append("\",");
-                            var tbp = template.GetType().GetProperty("BarsPeriod").GetValue(template, null);
-                            if (tbp != null) {
-                                sb.Append("\"template_BarsPeriodType\":\"").Append(tbp.GetType().GetProperty("BarsPeriodType").GetValue(tbp, null)).Append("\",");
-                                sb.Append("\"template_BarsPeriodValue\":").Append(tbp.GetType().GetProperty("Value").GetValue(tbp, null));
-                            } else sb.Append("\"template_BarsPeriod\":null");
-                        }
-                    } catch (Exception ex) { sb.Append("\"error\":\"").Append(JsonEscape(ex.Message)).Append("\""); }
-                }));
-            } catch (Exception ex) { sb.Append("\"error\":\"").Append(JsonEscape(ex.Message)).Append("\""); }
-            sb.Append("}");
-            return sb.ToString();
-        }
-
-        // ────── Strategy development endpoints (write, compile, read source) ──────
-
-        private class WriteFileRequest { public string name { get; set; } public string code { get; set; } public string folder { get; set; } }
-
-        private string WriteStrategyFile(HttpListenerRequest req)
-        {
-            string bodyText;
-            using (var reader = new StreamReader(req.InputStream, req.ContentEncoding))
-                bodyText = reader.ReadToEnd();
-
-            WriteFileRequest wr;
-            try { wr = _jsonSer.Deserialize<WriteFileRequest>(bodyText); }
-            catch (Exception ex) { return "{\"error\":\"invalid json: " + JsonEscape(ex.Message) + "\"}"; }
-
-            if (wr == null || string.IsNullOrEmpty(wr.name))
-                return "{\"error\":\"missing required field: name (strategy class name)\"}";
-            if (string.IsNullOrEmpty(wr.code))
-                return "{\"error\":\"missing required field: code (C# NinjaScript source)\"}";
-            if (wr.name.Contains("..") || wr.name.Contains("/") || wr.name.Contains("\\"))
-                return "{\"error\":\"name contains invalid path characters\"}";
-
-            string folder = string.IsNullOrEmpty(wr.folder) ? "Strategies" : wr.folder;
-            if (folder.Contains("..")) return "{\"error\":\"folder contains path traversal\"}";
-
-            string customDir = NinjaTrader.Core.Globals.UserDataDir + @"bin\Custom\";
-            string targetDir = System.IO.Path.Combine(customDir, folder);
-            System.IO.Directory.CreateDirectory(targetDir);
-            string targetFile = System.IO.Path.Combine(targetDir, wr.name + ".cs");
-
-            try
-            {
-                System.IO.File.WriteAllText(targetFile, wr.code);
-                Log("wrote strategy file: " + targetFile + " (" + wr.code.Length + " chars)");
-                return "{\"path\":\"" + JsonEscape(targetFile) + "\",\"size\":" + wr.code.Length + ",\"hint\":\"call POST /compile next\"}";
-            }
-            catch (Exception ex)
-            {
-                return "{\"error\":\"write failed: " + JsonEscape(ex.Message) + "\"}";
-            }
-        }
-
-        private string ReadStrategyFile(string name)
-        {
-            if (string.IsNullOrEmpty(name) || name.Contains("..") || name.Contains("/") || name.Contains("\\"))
-                return "{\"error\":\"invalid name\"}";
-            string customDir = NinjaTrader.Core.Globals.UserDataDir + @"bin\Custom\";
-            // Search common folders for the file
-            foreach (var sub in new[] { "Strategies", "Indicators", "AddOns", "BarsTypes", "DrawingTools" })
-            {
-                string path = System.IO.Path.Combine(customDir, sub, name + ".cs");
-                if (System.IO.File.Exists(path))
-                {
-                    try
-                    {
-                        string code = System.IO.File.ReadAllText(path);
-                        var sb = new StringBuilder("{");
-                        sb.Append("\"name\":\"").Append(JsonEscape(name)).Append("\",");
-                        sb.Append("\"folder\":\"").Append(sub).Append("\",");
-                        sb.Append("\"path\":\"").Append(JsonEscape(path)).Append("\",");
-                        sb.Append("\"size\":").Append(code.Length).Append(",");
-                        sb.Append("\"code\":\"").Append(JsonEscape(code)).Append("\"");
-                        sb.Append("}");
-                        return sb.ToString();
-                    }
-                    catch (Exception ex) { return "{\"error\":\"read failed: " + JsonEscape(ex.Message) + "\"}"; }
-                }
-            }
-            return "{\"error\":\"file not found\",\"name\":\"" + JsonEscape(name) + "\"}";
-        }
 
         private string CompileNinjaScript(bool fullCompile = false)
         {
@@ -1370,499 +1045,6 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
         }
 
-        // ────── Backtest endpoints ──────
-
-        private string EnqueueBacktest(HttpListenerRequest req)
-        {
-            string bodyText;
-            using (var reader = new StreamReader(req.InputStream, req.ContentEncoding))
-                bodyText = reader.ReadToEnd();
-
-            BacktestRequest btr;
-            try { btr = _jsonSer.Deserialize<BacktestRequest>(bodyText); }
-            catch (Exception ex)
-            {
-                return "{\"error\":\"invalid json body: " + JsonEscape(ex.Message) + "\"}";
-            }
-
-            if (btr == null || string.IsNullOrEmpty(btr.strategy_name))
-                return "{\"error\":\"missing required field: strategy_name\"}";
-            if (string.IsNullOrEmpty(btr.instrument))
-                return "{\"error\":\"missing required field: instrument\"}";
-            if (string.IsNullOrEmpty(btr.from_date) || string.IsNullOrEmpty(btr.to_date))
-                return "{\"error\":\"missing required fields: from_date, to_date (yyyy-MM-dd)\"}";
-            if (string.IsNullOrEmpty(btr.bars_period_type)) btr.bars_period_type = "Minute";
-            if (btr.bars_period_value <= 0) btr.bars_period_value = 5;
-
-            var job = new BacktestJob
-            {
-                id = Guid.NewGuid().ToString("N").Substring(0, 12),
-                request = btr,
-                status = "queued",
-                created = DateTime.Now,
-            };
-            _jobs[job.id] = job;
-            _jobQueue.Add(job);
-
-            Log(string.Format("enqueued backtest {0}: {1} on {2} {3}{4} {5}->{6}",
-                job.id, btr.strategy_name, btr.instrument, btr.bars_period_value, btr.bars_period_type,
-                btr.from_date, btr.to_date));
-
-            return "{\"id\":\"" + job.id + "\",\"status\":\"queued\",\"poll\":\"/backtest/" + job.id + "\"}";
-        }
-
-        private string RunBacktestSync(HttpListenerRequest req)
-        {
-            // Parse request (same as EnqueueBacktest)
-            string bodyText;
-            using (var reader = new StreamReader(req.InputStream, req.ContentEncoding))
-                bodyText = reader.ReadToEnd();
-
-            BacktestRequest btr;
-            try { btr = _jsonSer.Deserialize<BacktestRequest>(bodyText); }
-            catch (Exception ex) { return "{\"error\":\"invalid json: " + JsonEscape(ex.Message) + "\"}"; }
-
-            if (btr == null || string.IsNullOrEmpty(btr.strategy_name))
-                return "{\"error\":\"missing required field: strategy_name\"}";
-            if (string.IsNullOrEmpty(btr.instrument))
-                return "{\"error\":\"missing required field: instrument\"}";
-            if (string.IsNullOrEmpty(btr.from_date) || string.IsNullOrEmpty(btr.to_date))
-                return "{\"error\":\"missing required fields: from_date, to_date\"}";
-            if (string.IsNullOrEmpty(btr.bars_period_type)) btr.bars_period_type = "Minute";
-            if (btr.bars_period_value <= 0) btr.bars_period_value = 5;
-
-            // Queue and wait
-            var job = new BacktestJob
-            {
-                id = Guid.NewGuid().ToString("N").Substring(0, 12),
-                request = btr,
-                status = "queued",
-                created = DateTime.Now,
-            };
-            _jobs[job.id] = job;
-            _jobQueue.Add(job);
-            Log("sync backtest " + job.id + ": " + btr.strategy_name);
-
-            // Block until completed or failed (max 15 min)
-            var deadline = DateTime.Now.AddMinutes(15);
-            while (DateTime.Now < deadline)
-            {
-                if (job.status == "completed" || job.status == "failed")
-                    break;
-                Thread.Sleep(200);
-            }
-
-            return GetBacktestJobJson(job.id);
-        }
-
-        private string GetBacktestJobJson(string jobId)
-        {
-            BacktestJob job;
-            if (!_jobs.TryGetValue(jobId, out job))
-                return "{\"error\":\"job not found\",\"id\":\"" + JsonEscape(jobId) + "\"}";
-
-            var sb = new StringBuilder("{");
-            sb.Append("\"id\":\"").Append(job.id).Append("\",");
-            sb.Append("\"status\":\"").Append(job.status).Append("\",");
-            sb.Append("\"strategy\":\"").Append(JsonEscape(job.request.strategy_name)).Append("\",");
-            sb.Append("\"instrument\":\"").Append(JsonEscape(job.request.instrument)).Append("\",");
-            sb.Append("\"from\":\"").Append(JsonEscape(job.request.from_date)).Append("\",");
-            sb.Append("\"to\":\"").Append(JsonEscape(job.request.to_date)).Append("\",");
-            sb.Append("\"created\":\"").Append(job.created.ToString("yyyy-MM-ddTHH:mm:ss")).Append("\",");
-            sb.Append("\"elapsed_ms\":").Append(job.elapsed_ms.ToString("F0"));
-            if (job.status == "completed" && !string.IsNullOrEmpty(job.results_json))
-            {
-                sb.Append(",\"results\":").Append(job.results_json);
-                sb.Append(",\"completed\":\"").Append(job.completed.Value.ToString("yyyy-MM-ddTHH:mm:ss")).Append("\"");
-            }
-            if (job.status == "failed" && !string.IsNullOrEmpty(job.error))
-                sb.Append(",\"error\":\"").Append(JsonEscape(job.error)).Append("\"");
-            sb.Append("}");
-            return sb.ToString();
-        }
-
-        private string ListBacktestJobsJson()
-        {
-            var sb = new StringBuilder("[");
-            bool first = true;
-            foreach (var kv in _jobs)
-            {
-                if (!first) sb.Append(",");
-                sb.Append("{");
-                sb.Append("\"id\":\"").Append(kv.Value.id).Append("\",");
-                sb.Append("\"status\":\"").Append(kv.Value.status).Append("\",");
-                sb.Append("\"strategy\":\"").Append(JsonEscape(kv.Value.request.strategy_name)).Append("\",");
-                sb.Append("\"elapsed_ms\":").Append(kv.Value.elapsed_ms.ToString("F0"));
-                sb.Append("}");
-                first = false;
-            }
-            sb.Append("]");
-            return sb.ToString();
-        }
-
-        // ────── Backtest worker (single-threaded, runs jobs sequentially) ──────
-
-        private void BacktestWorkerLoop()
-        {
-            Log("backtest worker thread started");
-            while (!_jobQueue.IsCompleted)
-            {
-                BacktestJob job;
-                try { job = _jobQueue.Take(); }
-                catch (InvalidOperationException) { break; }
-                catch (Exception ex) { Log("worker take error: " + ex.Message); continue; }
-
-                job.status = "running";
-                var start = DateTime.Now;
-                try
-                {
-                    job.results_json = RunBacktest(job.request);
-                    job.status = "completed";
-                    job.completed = DateTime.Now;
-                }
-                catch (Exception ex)
-                {
-                    job.status = "failed";
-                    job.error = ex.Message + " | " + (ex.InnerException != null ? ex.InnerException.Message : "");
-                    Log("backtest " + job.id + " failed: " + ex.Message);
-                }
-                job.elapsed_ms = (DateTime.Now - start).TotalMilliseconds;
-                Log("backtest " + job.id + " " + job.status + " in " + job.elapsed_ms.ToString("F0") + "ms");
-            }
-            Log("backtest worker thread exiting");
-        }
-
-        // ────── The actual backtest execution (WIP — filled after WPF reflection research) ──────
-
-        private string RunBacktest(BacktestRequest req)
-        {
-            // Strategy Analyzer WPF automation - in-process, via reflection.
-            // Types (all in NinjaTrader.Gui.dll):
-            //   NinjaTrader.Gui.NinjaScript.StrategyAnalyzer.StrategyAnalyzer            - the window
-            //   NinjaTrader.Gui.NinjaScript.StrategyAnalyzer.StrategyAnalyzerViewModel   - window VM
-            //   NinjaTrader.Gui.NinjaScript.StrategyAnalyzer.StrategyAnalyzerTabControl  - tab
-            //   NinjaTrader.Gui.NinjaScript.StrategyAnalyzer.StrategyAnalyzerTabProperties - config
-            //
-            // REQUIRES: a Strategy Analyzer window to be open in NT8 (auto-open TBD in v2).
-
-            // Step 1: find SA window on NT8 main thread (cheap read-only scan)
-            var lookupDisp = NinjaTrader.Core.Globals.MainThreadDispatcher;
-            if (lookupDisp == null)
-                throw new Exception("NT8 MainThreadDispatcher is null");
-
-            object saWindowRef = null;
-            lookupDisp.Invoke(new Action(() =>
-            {
-                foreach (var w in NinjaTrader.Core.Globals.AllWindows)
-                {
-                    if (w.GetType().FullName == "NinjaTrader.Gui.NinjaScript.StrategyAnalyzer.StrategyAnalyzer")
-                    { saWindowRef = w; return; }
-                }
-            }));
-            if (saWindowRef == null)
-                throw new Exception("No Strategy Analyzer window open. Open one in NT8 first (New > Strategy Analyzer).");
-
-            // Step 2: all SA UI operations go through THIS window's own Dispatcher
-            var disp = ((System.Windows.Threading.DispatcherObject)saWindowRef).Dispatcher;
-
-            string resultJson = null;
-            Exception dispatchError = null;
-            DateTime? fromDate = null, toDate = null;
-            try { fromDate = DateTime.Parse(req.from_date); toDate = DateTime.Parse(req.to_date); }
-            catch { throw new Exception("Invalid date format. Use yyyy-MM-dd."); }
-
-            // Setup phase: configure the tab + kick off the run (on SA window's dispatcher)
-            object tabObj = null;
-            object resultsColl = null;
-            int initialResultsCount = 0;
-            string initialRunGuid = null;
-            object propsRef = null;
-
-            disp.Invoke(new Action(() =>
-            {
-                try
-                {
-                    object saWindow = saWindowRef;
-
-                    // 2. ViewModel
-                    var vm = saWindow.GetType().GetProperty("ViewModel").GetValue(saWindow, null);
-
-                    // 3. SelectedTab
-                    var tab = vm.GetType().GetProperty("SelectedTab").GetValue(vm, null);
-                    if (tab == null)
-                        throw new Exception("No tab selected in Strategy Analyzer.");
-                    tabObj = tab;
-
-                    // 4. TabStrategyProperties
-                    var props = tab.GetType().GetProperty("TabStrategyProperties").GetValue(tab, null);
-                    if (props == null)
-                        throw new Exception("TabStrategyProperties is null on SelectedTab.");
-
-                    // 5. Force strategy re-instantiation by toggling to a different strategy then back.
-                    // Without this, SA caches the old compiled instance even after auto-compile.
-                    var stratProp = props.GetType().GetProperty("Strategy");
-                    string currentStrat = (string)stratProp.GetValue(props, null) ?? "";
-                    if (currentStrat == req.strategy_name)
-                    {
-                        // Toggle to SampleMACrossover (built-in) to force SA to release current instance
-                        stratProp.SetValue(props, "SampleMACrossover", null);
-                    }
-                    stratProp.SetValue(props, req.strategy_name, null);
-
-                    // 6. Instrument
-                    props.GetType().GetProperty("InstrumentOrInstrumentList").SetValue(props, req.instrument, null);
-
-                    // 9. StrategyTemplate (holds From/To/parameters)
-                    var template = props.GetType().GetProperty("StrategyTemplate").GetValue(props, null);
-                    if (template == null)
-                        throw new Exception("StrategyTemplate is null - strategy name may be unrecognized: " + req.strategy_name);
-
-                    // 10. Dates on template (StrategyBase.From / StrategyBase.To are DateTime)
-                    var fromProp = template.GetType().GetProperty("From");
-                    var toProp = template.GetType().GetProperty("To");
-                    if (fromProp != null && toProp != null)
-                    {
-                        fromProp.SetValue(template, fromDate.Value, null);
-                        toProp.SetValue(template, toDate.Value, null);
-                    }
-
-                    // 11. BarsPeriod on template - direct reference, no reflection
-                    try
-                    {
-                        var bp = new NinjaTrader.Data.BarsPeriod();
-                        bp.BarsPeriodType = (NinjaTrader.Data.BarsPeriodType)Enum.Parse(typeof(NinjaTrader.Data.BarsPeriodType), req.bars_period_type, true);
-                        bp.Value = req.bars_period_value;
-                        // Try property setter first
-                        var bpProp = template.GetType().GetProperty("BarsPeriod");
-                        bool setOk = false;
-                        if (bpProp != null && bpProp.CanWrite)
-                        {
-                            bpProp.SetValue(template, bp, null);
-                            setOk = true;
-                        }
-                        if (!setOk)
-                        {
-                            // Walk backing fields in inheritance chain
-                            var tt = template.GetType();
-                            while (tt != null && !setOk)
-                            {
-                                foreach (var f in tt.GetFields(System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
-                                {
-                                    if (f.Name.ToLower().Contains("barsperiod") && f.FieldType == typeof(NinjaTrader.Data.BarsPeriod))
-                                    {
-                                        f.SetValue(template, bp);
-                                        setOk = true;
-                                        Log("BarsPeriod set via field: " + f.Name);
-                                        break;
-                                    }
-                                }
-                                tt = tt.BaseType;
-                            }
-                        }
-                        if (!setOk) Log("BarsPeriod setter not found on StrategyBase - template will use its default period");
-                        else Log("BarsPeriod set: " + req.bars_period_type + " " + req.bars_period_value);
-                    }
-                    catch (Exception bpex) { Log("BarsPeriod set failed: " + bpex.Message); }
-
-                    // 11b. Always enable commission with "Prop Firm" template
-                    try
-                    {
-                        var commProp = template.GetType().GetProperty("IncludeCommission");
-                        if (commProp != null && commProp.CanWrite)
-                            commProp.SetValue(template, true, null);
-
-                        // Try known property names for commission template
-                        string[] commPropNames = { "BacktestCommissionTemplate", "Commission", "CommissionTemplate" };
-                        bool commSet = false;
-                        foreach (var cn in commPropNames)
-                        {
-                            var cp = template.GetType().GetProperty(cn);
-                            if (cp != null && cp.CanWrite && cp.PropertyType == typeof(string))
-                            {
-                                cp.SetValue(template, "Prop Firm", null);
-                                Log("Commission template set via " + cn + " = Prop Firm");
-                                commSet = true;
-                                break;
-                            }
-                        }
-                        if (!commSet)
-                        {
-                            // Dump all string properties to find the right one
-                            var allProps = template.GetType().GetProperties();
-                            var strProps = new List<string>();
-                            foreach (var p in allProps)
-                                if (p.PropertyType == typeof(string) && p.Name.ToLower().Contains("comm"))
-                                    strProps.Add(p.Name);
-                            Log("IncludeCommission=true but no commission template property found. Candidates: " + string.Join(", ", strProps));
-                        }
-                    }
-                    catch (Exception cex) { Log("Commission setup failed: " + cex.Message); }
-
-                    // 12. Apply parameters (if provided)
-                    if (req.parameters != null)
-                    {
-                        foreach (var kv in req.parameters)
-                        {
-                            var p = template.GetType().GetProperty(kv.Key);
-                            if (p != null && p.CanWrite)
-                            {
-                                try
-                                {
-                                    var converted = Convert.ChangeType(kv.Value, p.PropertyType);
-                                    p.SetValue(template, converted, null);
-                                }
-                                catch (Exception pex)
-                                {
-                                    Log("param set failed " + kv.Key + ": " + pex.Message);
-                                }
-                            }
-                        }
-                    }
-
-                    // 13. Snapshot state BEFORE running (SelectedRunGuid changes on new run completion)
-                    tabObj = tab;
-                    propsRef = props;
-                    var resultsProp = tab.GetType().GetProperty("Results");
-                    resultsColl = resultsProp.GetValue(tab, null);
-                    initialRunGuid = (string)props.GetType().GetProperty("SelectedRunGuid").GetValue(props, null) ?? "";
-
-                    // 14. Invoke OnRun (public method on VM)
-                    var onRun = vm.GetType().GetMethod("OnRun", new[] { typeof(object), typeof(System.Windows.Input.ExecutedRoutedEventArgs) });
-                    if (onRun == null)
-                        throw new Exception("OnRun method not found on ViewModel.");
-                    onRun.Invoke(vm, new object[] { null, null });
-                }
-                catch (Exception ex) { dispatchError = ex; }
-            }));
-
-            if (dispatchError != null) throw dispatchError;
-
-            // Polling phase: wait for SelectedRunGuid to change AND IsProgressVisible to go false
-            var deadline = DateTime.Now.AddMinutes(15);
-            bool guidChanged = false;
-            bool notRunning = false;
-            while (DateTime.Now < deadline)
-            {
-                Thread.Sleep(500);
-                disp.Invoke(new Action(() =>
-                {
-                    try
-                    {
-                        var curGuid = (string)propsRef.GetType().GetProperty("SelectedRunGuid").GetValue(propsRef, null) ?? "";
-                        if (curGuid != initialRunGuid && !string.IsNullOrEmpty(curGuid)) guidChanged = true;
-                        var isProg = (bool)tabObj.GetType().GetProperty("IsProgressVisible").GetValue(tabObj, null);
-                        notRunning = !isProg;
-                    }
-                    catch { }
-                }));
-                if (guidChanged && notRunning) break;
-            }
-            if (!guidChanged)
-                throw new TimeoutException("Backtest did not complete within 15 minutes (SelectedRunGuid unchanged).");
-
-            // Extraction phase: read SelectedResult (the latest completed entry)
-            disp.Invoke(new Action(() =>
-            {
-                try
-                {
-                    var selResult = tabObj.GetType().GetProperty("SelectedResult").GetValue(tabObj, null);
-                    if (selResult == null)
-                    {
-                        // Fall back: take last entry in Results collection
-                        var countNow = (int)resultsColl.GetType().GetProperty("Count").GetValue(resultsColl, null);
-                        if (countNow == 0) throw new Exception("Results collection empty and SelectedResult is null");
-                        var indexer = resultsColl.GetType().GetProperty("Item");
-                        selResult = indexer.GetValue(resultsColl, new object[] { countNow - 1 });
-                    }
-                    resultJson = ExtractResultJson(selResult);
-                }
-                catch (Exception ex) { dispatchError = ex; }
-            }));
-
-            if (dispatchError != null) throw dispatchError;
-            return resultJson ?? "{\"error\":\"no result extracted\"}";
-        }
-
-        private string ExtractResultJson(object gridEntry)
-        {
-            // StrategyAnalyzerGridEntry has a Strategy (StrategyBase) whose SystemPerformance has the results.
-            // Try common property names.
-            var et = gridEntry.GetType();
-            object strategy = null;
-            foreach (var name in new[] { "ResultsStrategy", "CachedParentStrategyClone", "Strategy", "StrategyBase", "StrategyTemplate" })
-            {
-                var p = et.GetProperty(name);
-                if (p != null) { strategy = p.GetValue(gridEntry, null); if (strategy != null) break; }
-            }
-
-            SystemPerformance perf = null;
-            if (strategy != null)
-            {
-                var spProp = strategy.GetType().GetProperty("SystemPerformance");
-                if (spProp != null) perf = spProp.GetValue(strategy, null) as SystemPerformance;
-            }
-            if (perf == null)
-            {
-                // Also check if the entry has SystemPerformance directly
-                var spProp = et.GetProperty("SystemPerformance");
-                if (spProp != null) perf = spProp.GetValue(gridEntry, null) as SystemPerformance;
-            }
-
-            if (perf == null || perf.AllTrades == null || perf.AllTrades.Count == 0)
-                return "{\"trades\":0,\"net_profit\":0,\"note\":\"backtest completed but produced no trades or performance data\"}";
-
-            var allTrades = perf.AllTrades;
-            var winTrades = allTrades.WinningTrades;
-            var loseTrades = allTrades.LosingTrades;
-            var currency = allTrades.TradesPerformance.Currency;
-
-            double grossProfit = winTrades.Count > 0 ? winTrades.TradesPerformance.Currency.CumProfit : 0;
-            double grossLoss = loseTrades.Count > 0 ? loseTrades.TradesPerformance.Currency.CumProfit : 0;
-            double pf = grossLoss != 0 ? Math.Abs(grossProfit / grossLoss) : 0;
-            double winRate = allTrades.Count > 0 ? (100.0 * winTrades.Count / allTrades.Count) : 0;
-            double avgWin = winTrades.Count > 0 ? grossProfit / winTrades.Count : 0;
-            double avgLoss = loseTrades.Count > 0 ? grossLoss / loseTrades.Count : 0;
-
-            // Long/short split
-            var longTrades = perf.LongTrades;
-            var shortTrades = perf.ShortTrades;
-            double longNet = longTrades.Count > 0 ? longTrades.TradesPerformance.Currency.CumProfit : 0;
-            double shortNet = shortTrades.Count > 0 ? shortTrades.TradesPerformance.Currency.CumProfit : 0;
-            double longGrossProfit = longTrades.WinningTrades.Count > 0 ? longTrades.WinningTrades.TradesPerformance.Currency.CumProfit : 0;
-            double longGrossLoss = longTrades.LosingTrades.Count > 0 ? longTrades.LosingTrades.TradesPerformance.Currency.CumProfit : 0;
-            double shortGrossProfit = shortTrades.WinningTrades.Count > 0 ? shortTrades.WinningTrades.TradesPerformance.Currency.CumProfit : 0;
-            double shortGrossLoss = shortTrades.LosingTrades.Count > 0 ? shortTrades.LosingTrades.TradesPerformance.Currency.CumProfit : 0;
-            double longPf = longGrossLoss != 0 ? Math.Abs(longGrossProfit / longGrossLoss) : 0;
-            double shortPf = shortGrossLoss != 0 ? Math.Abs(shortGrossProfit / shortGrossLoss) : 0;
-
-            var sb = new StringBuilder("{");
-            sb.Append("\"trades\":").Append(allTrades.Count).Append(",");
-            sb.Append("\"wins\":").Append(winTrades.Count).Append(",");
-            sb.Append("\"losses\":").Append(loseTrades.Count).Append(",");
-            sb.Append("\"win_rate_pct\":").Append(winRate.ToString("F2")).Append(",");
-            sb.Append("\"net_profit\":").Append(currency.CumProfit.ToString("F2")).Append(",");
-            sb.Append("\"gross_profit\":").Append(grossProfit.ToString("F2")).Append(",");
-            sb.Append("\"gross_loss\":").Append(grossLoss.ToString("F2")).Append(",");
-            sb.Append("\"profit_factor\":").Append(pf.ToString("F3")).Append(",");
-            sb.Append("\"avg_win\":").Append(avgWin.ToString("F2")).Append(",");
-            sb.Append("\"avg_loss\":").Append(avgLoss.ToString("F2")).Append(",");
-            try { sb.Append("\"max_drawdown\":").Append(currency.Drawdown.ToString("F2")).Append(","); } catch { sb.Append("\"max_drawdown\":null,"); }
-            try { sb.Append("\"sharpe\":").Append(perf.AllTrades.TradesPerformance.SharpeRatio.ToString("F3")).Append(","); } catch { sb.Append("\"sharpe\":null,"); }
-            try { sb.Append("\"sortino\":").Append(perf.AllTrades.TradesPerformance.SortinoRatio.ToString("F3")).Append(","); } catch { sb.Append("\"sortino\":null,"); }
-            // Long/short split
-            sb.Append("\"long\":{");
-            sb.Append("\"trades\":").Append(longTrades.Count).Append(",");
-            sb.Append("\"net_profit\":").Append(longNet.ToString("F2")).Append(",");
-            sb.Append("\"profit_factor\":").Append(longPf.ToString("F3"));
-            sb.Append("},");
-            sb.Append("\"short\":{");
-            sb.Append("\"trades\":").Append(shortTrades.Count).Append(",");
-            sb.Append("\"net_profit\":").Append(shortNet.ToString("F2")).Append(",");
-            sb.Append("\"profit_factor\":").Append(shortPf.ToString("F3"));
-            sb.Append("}");
-            sb.Append("}");
-            return sb.ToString();
-        }
 
         // ────── Utilities ──────
 
@@ -1948,22 +1130,6 @@ namespace NinjaTrader.NinjaScript.AddOns
                     return v.ToString();
             }
             return "";
-        }
-
-        private bool GetAnyBooleanProperty(object target, string[] names)
-        {
-            if (target == null || names == null) return false;
-            foreach (var n in names)
-            {
-                object v;
-                if (!TryGetPropertyValue(target, n, out v) || v == null)
-                    continue;
-                if (v is bool) return (bool)v;
-                bool parsed;
-                if (bool.TryParse(v.ToString(), out parsed))
-                    return parsed;
-            }
-            return false;
         }
 
         private bool InvokeBestEffortNoArg(object target, string[] methodNames, out string error)

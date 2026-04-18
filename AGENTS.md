@@ -122,6 +122,7 @@ Key paths:
 - Keep `status` concise by default; detail behind `--verbose` / `--json`.
 - Alert send failures must be visible in both terminal output and event log.
 - **In `HealthBridge.cs`, always prefer reflection** over hardcoded NT API calls. NT8 internals vary across versions; reflection keeps the bridge resilient when NT changes a type or method signature. Fall back to direct calls only when reflection is genuinely infeasible.
+- **`HealthBridge.cs` stays minimal — health + recovery only.** Do not add strategy-development, backtesting, strategy-source, compile-queueing, or diagnostic endpoints (strategies/SA/windows lists) to this AddOn. Those live in a separate strategy-dev AddOn. If tempted to add new endpoints, check whether they belong there instead. Keep this bridge's surface area small so it's cheap to audit and slow to break.
 
 ## Installing Bridge Changes
 
