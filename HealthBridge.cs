@@ -28,6 +28,7 @@ namespace NinjaTrader.NinjaScript.AddOns
     ///   GET  /accounts, /positions, /connections, /orders, /trades, /daily_pnl
     ///   POST /recover/reconnect               {"connection_names":[...]}
     ///   POST /recover/flatten_then_reconnect  flatten all positions then reconnect
+    ///   POST /strategies/enable_all           SetState(Active) on every non-Active strategy
     ///   POST /compile                         {"full":true} for full recompile (reload DLL)
     /// </summary>
     public class HealthBridge : AddOnBase
@@ -42,7 +43,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
         // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
         // Format: UTC timestamp at edit time.
-        private const string BuildId = "2026-04-18T19:00:00Z";
+        private const string BuildId = "2026-04-18T21:45:00Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -219,6 +220,10 @@ namespace NinjaTrader.NinjaScript.AddOns
                 else if (method == "POST" && path == "/recover/flatten_then_reconnect")
                 {
                     body = RecoverReconnectJson(true, ctx.Request);
+                }
+                else if (method == "POST" && path == "/strategies/enable_all")
+                {
+                    body = EnableAllStrategiesJson();
                 }
                 else
                 {
@@ -2014,6 +2019,93 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
             catch { }
             return names;
+        }
+
+
+        // Spawns a PowerShell that uses UIAutomation to toggle every unchecked
+        // Enabled-checkbox on the CC Strategies grid. NT's internal lifecycle handles
+        // the full state walk once the checkbox flips — same path as a user mouse click.
+        // AutomationId is EnableDisableSingleStrategyCommand (one per visible strategy row).
+        private const string _PS_ENABLE_STRATS_SCRIPT = @"
+Add-Type -AssemblyName UIAutomationClient -ErrorAction SilentlyContinue
+Add-Type -AssemblyName UIAutomationTypes  -ErrorAction SilentlyContinue
+$auto = [System.Windows.Automation.AutomationElement]
+$tree = [System.Windows.Automation.TreeScope]
+$cond = New-Object System.Windows.Automation.PropertyCondition($auto::ClassNameProperty, 'ControlCenter')
+$win = $auto::RootElement.FindFirst($tree::Children, $cond)
+if (-not $win) { exit 2 }
+$cbCond = New-Object System.Windows.Automation.PropertyCondition($auto::ControlTypeProperty, [System.Windows.Automation.ControlType]::CheckBox)
+$cbs = $win.FindAll($tree::Descendants, $cbCond)
+$toggled = 0
+for ($i=0; $i -lt $cbs.Count; $i++) {
+    $cb = $cbs.Item($i)
+    if ($cb.Current.AutomationId -ne 'EnableDisableSingleStrategyCommand') { continue }
+    try {
+        $tp = $cb.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
+        if ($tp.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::On) {
+            $tp.Toggle()
+            $toggled++
+            Start-Sleep -Milliseconds 400
+        }
+    } catch { }
+}
+Write-Host (""toggled="" + $toggled + "" count="" + $cbs.Count)
+";
+
+        private string EnableAllStrategiesJson()
+        {
+            int toggled = 0;
+            int count = 0;
+            string errMsg = "";
+            try
+            {
+                // -EncodedCommand expects UTF-16 LE base64 — reliable way to ship a multiline
+                // script into powershell.exe without quoting/newline surprises.
+                var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(_PS_ENABLE_STRATS_SCRIPT));
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "powershell",
+                    Arguments = "-NoProfile -WindowStyle Hidden -EncodedCommand " + encoded,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                };
+                using (var p = System.Diagnostics.Process.Start(psi))
+                {
+                    if (!p.WaitForExit(10000))
+                    {
+                        try { p.Kill(); } catch { }
+                        errMsg = "powershell timeout";
+                    }
+                    else
+                    {
+                        string so = p.StandardOutput.ReadToEnd() ?? "";
+                        string se = p.StandardError.ReadToEnd() ?? "";
+                        var m = System.Text.RegularExpressions.Regex.Match(so, @"toggled=(\d+) count=(\d+)");
+                        if (m.Success)
+                        {
+                            toggled = int.Parse(m.Groups[1].Value);
+                            count = int.Parse(m.Groups[2].Value);
+                        }
+                        if (!string.IsNullOrEmpty(se)) errMsg = se.Trim();
+                    }
+                }
+                Log("enable_all_strategies (UIA) toggled=" + toggled + "/" + count + (string.IsNullOrEmpty(errMsg) ? "" : " err=" + errMsg));
+            }
+            catch (Exception ex)
+            {
+                errMsg = ex.Message;
+                Log("enable_all_strategies (UIA) failed: " + ex.Message);
+            }
+
+            var sb0 = new StringBuilder("{");
+            sb0.Append("\"method\":\"uia_toggle\",");
+            sb0.Append("\"toggled\":").Append(toggled).Append(",");
+            sb0.Append("\"checkbox_count\":").Append(count).Append(",");
+            sb0.Append("\"error\":\"").Append(JsonEscape(errMsg)).Append("\"");
+            sb0.Append("}");
+            return sb0.ToString();
         }
 
         private string JsonEscape(string s)

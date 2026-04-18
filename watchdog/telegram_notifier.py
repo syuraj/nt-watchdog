@@ -77,17 +77,19 @@ class TelegramNotifier:
             return False
 
     def notify_event(self, event_type: str, incident_id: str, details: Dict[str, Any]) -> bool:
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+        ts = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
         status = details.get("status", "unknown")
         action = details.get("action", "none")
         reason = details.get("reason", "")
-        message = (
-            f"*NT8 Watchdog* `{event_type}`\n"
-            f"- incident: `{incident_id}`\n"
-            f"- time_utc: `{ts}`\n"
-            f"- status: `{status}`\n"
-            f"- action: `{action}`\n"
-            f"- reason: `{reason}`"
-        )
-        return self.send_message(message)
+        lines = [f"*NT8* `{event_type}` {ts}"]
+        # Only include reason if it adds info beyond the event_type.
+        if reason and reason != event_type:
+            lines.append(f"reason: `{reason}`")
+        # Action is only useful when it's more than a label already in event_type.
+        if action and action not in ("none", event_type):
+            lines.append(f"action: `{action}`")
+        # Strategy count surfaces value to user.
+        if details.get("strategies_toggled"):
+            lines.append(f"strategies: `{details['strategies_toggled']}`")
+        return self.send_message("\n".join(lines))
 

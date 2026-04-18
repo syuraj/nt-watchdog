@@ -24,6 +24,9 @@ class FakeBridge:
             return {"success": False, "error": "no more fake responses"}
         return self.reconnect_results[idx]
 
+    def enable_all_strategies(self, timeout_sec: int = 15) -> Dict[str, Any]:
+        return {"method": "uia_toggle", "toggled": 0, "checkbox_count": 0, "error": ""}
+
 
 class FakeProcessManager:
     def __init__(self, restart_ok: bool = True) -> None:

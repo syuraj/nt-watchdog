@@ -324,15 +324,32 @@ class RecoveryManager:
         if reconnect_ok:
             self.runtime_state["reconnect_failures"] = 0
             self._persist_runtime()
+            # After a successful reconnect, re-enable any strategies that went offline
+            # when the broker dropped. Idempotent — already-enabled rows are skipped.
+            strat_result = self.bridge.enable_all_strategies()
+            self.state_store.append_event(
+                {
+                    "kind": "strategies_enable",
+                    "toggled": strat_result.get("toggled", 0),
+                    "checkbox_count": strat_result.get("checkbox_count", 0),
+                    "details": strat_result,
+                }
+            )
             notify_meta = self._notify(
                 "reconnect_success",
-                {"status": status, "action": "reconnect", "reason": reason_str or "reconnect_success"},
+                {
+                    "status": status,
+                    "action": "reconnect",
+                    "reason": reason_str or "reconnect_success",
+                    "strategies_toggled": strat_result.get("toggled", 0),
+                },
             )
             result = {
                 "state": "recovering",
                 "action": "reconnect",
                 "reason": "reconnect_success",
                 "incident_id": incident_id,
+                "strategies_toggled": strat_result.get("toggled", 0),
             }
             result.update(notify_meta)
             return result
@@ -385,6 +402,7 @@ class RecoveryManager:
             result.update(notify_meta)
             return result
 
+        restart_reason = f"reconnect_attempt_{failures}_failed_restart"
         restarted = self.process_manager.restart(startup_grace_sec=self.config.startup_grace_sec)
         if restarted:
             self.runtime_state["reconnect_failures"] = 0
@@ -394,17 +412,17 @@ class RecoveryManager:
                     "kind": "restart",
                     "status": "success",
                     "incident_id": incident_id,
-                    "reason": reason_str or "reconnect_limit_reached",
+                    "reason": restart_reason,
                 }
             )
             notify_meta = self._notify(
                 "restart_success",
-                {"status": "recovering", "action": "restart_nt", "reason": "restart_completed"},
+                {"status": "recovering", "action": "restart_nt", "reason": restart_reason},
             )
             result = {
                 "state": "recovering",
                 "action": "restart_nt",
-                "reason": "reconnect_limit_reached",
+                "reason": restart_reason,
                 "incident_id": incident_id,
             }
             result.update(notify_meta)
