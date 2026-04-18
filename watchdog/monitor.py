@@ -140,7 +140,10 @@ def run_watchdog(config: WatchdogConfig, max_cycles: int = 0) -> None:
             if max_cycles > 0 and cycle_num >= max_cycles:
                 print(f"[{_now()}] max_cycles reached ({max_cycles}); exiting watchdog loop.")
                 break
-            time.sleep(config.poll_interval_sec)
+            sleep_sec = int(result.get("sleep_override_sec") or config.poll_interval_sec)
+            if sleep_sec != config.poll_interval_sec:
+                print(f"[{_now()}] backoff sleep {sleep_sec}s (override)")
+            time.sleep(sleep_sec)
     finally:
         single_lock.release()
 

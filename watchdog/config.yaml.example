@@ -26,8 +26,10 @@ recovery_only_when_flat: false
 nt_executable_path: "C:\\Program Files\\NinjaTrader 8\\bin\\NinjaTrader.exe"
 nt_process_name: "NinjaTrader"
 nt_start_args: []
-# NT login credentials passed as -u/-p args on start. Prefer env vars
-# WATCHDOG_NT_USERNAME / WATCHDOG_NT_PASSWORD over keeping them in the file.
+# NT login credentials. After restart, a detached PowerShell helper waits for
+# the login dialog and types username/password via SendKeys. NT8 has no CLI
+# auth flag, so this is the only way to auto-login after an unattended restart.
+# Prefer env vars WATCHDOG_NT_USERNAME / WATCHDOG_NT_PASSWORD over the file.
 nt_username: ""
 nt_password: ""
 process_detect_fallback: true

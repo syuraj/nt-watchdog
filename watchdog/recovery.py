@@ -321,12 +321,19 @@ class RecoveryManager:
         self._persist_runtime()
 
         if failures < self.config.reconnect_attempt_limit:
+            # Exponential backoff: double the sleep each failure, capped at 8x the poll interval.
+            # Base cadence stays poll_interval_sec (60s); after failures=1 sleep extra 60s → total 2m,
+            # failures=2 extra 180s → total 4m. Prevents log/alert noise on permanently-bad creds.
+            base = self.config.poll_interval_sec
+            extra = min(base * (2 ** (failures - 1) - 1), base * 7)
+            sleep_override = base + extra
             notify_meta = self._notify(
                 "reconnect_retrying",
                 {
                     "status": status,
                     "action": "reconnect_retry",
                     "reason": f"attempt_{failures}_failed",
+                    "next_retry_sec": sleep_override,
                 },
             )
             result = {
@@ -334,6 +341,7 @@ class RecoveryManager:
                 "action": "reconnect_retry_wait",
                 "reason": f"reconnect_attempt_{failures}_failed",
                 "incident_id": incident_id,
+                "sleep_override_sec": sleep_override,
             }
             result.update(notify_meta)
             return result

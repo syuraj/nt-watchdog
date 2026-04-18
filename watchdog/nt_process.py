@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 import time
@@ -7,6 +8,69 @@ from pathlib import Path
 from typing import Optional
 
 from .config import WatchdogConfig
+
+
+# PowerShell helper — watches for NT Welcome/login dialog and fills credentials
+# via UIAutomation (not SendKeys, which is flaky under focus races). Targets
+# AutomationId 'tbUserName', 'passwordBox', 'btnLogin'. Falls back to SendKeys
+# only if UIA can't find the fields.
+_PS_LOGIN_SCRIPT = r"""
+$user = $env:NT_LOGIN_USER
+$pwd  = $env:NT_LOGIN_PWD
+if (-not $user -or -not $pwd) { exit 2 }
+
+Add-Type -AssemblyName UIAutomationClient  -ErrorAction SilentlyContinue
+Add-Type -AssemblyName UIAutomationTypes   -ErrorAction SilentlyContinue
+
+$auto = [System.Windows.Automation.AutomationElement]
+$tree = [System.Windows.Automation.TreeScope]
+
+# Wait up to 90s for an NT window whose title looks like the login dialog.
+$deadline = (Get-Date).AddSeconds(90)
+$proc = $null
+while ((Get-Date) -lt $deadline) {
+    $proc = Get-Process NinjaTrader -ErrorAction SilentlyContinue |
+        Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -match 'log ?in|sign in|welcome' } |
+        Select-Object -First 1
+    if ($proc) { break }
+    Start-Sleep -Milliseconds 500
+}
+if (-not $proc) { exit 1 }
+
+$pidCond = New-Object System.Windows.Automation.PropertyCondition($auto::ProcessIdProperty, $proc.Id)
+$win = $auto::RootElement.FindFirst($tree::Children, $pidCond)
+if (-not $win) { exit 3 }
+
+function FindById($root, $id) {
+    $c = New-Object System.Windows.Automation.PropertyCondition($auto::AutomationIdProperty, $id)
+    return $root.FindFirst($tree::Descendants, $c)
+}
+
+$userBox = FindById $win 'tbUserName'
+$pwdBox  = FindById $win 'passwordBox'
+$btn     = FindById $win 'btnLogin'
+if (-not $userBox -or -not $pwdBox -or -not $btn) { exit 4 }
+
+# Set username via ValuePattern (clean, no focus games).
+$vp = [System.Windows.Automation.ValuePattern]
+$userVp = $userBox.GetCurrentPattern($vp::Pattern)
+$userVp.SetValue($user)
+Start-Sleep -Milliseconds 150
+
+# PasswordBox rejects ValuePattern — must focus + SendKeys into it.
+# Escape SendKeys meta-chars so +^%~(){}[] in password don't do magic.
+function Esc($s) { return ($s -replace '([+^%~(){}\[\]])', '{$1}') }
+Add-Type -AssemblyName System.Windows.Forms | Out-Null
+$pwdBox.SetFocus()
+Start-Sleep -Milliseconds 250
+[System.Windows.Forms.SendKeys]::SendWait((Esc $pwd))
+Start-Sleep -Milliseconds 250
+
+# Click Log In via InvokePattern.
+$ip = [System.Windows.Automation.InvokePattern]
+$btnIp = $btn.GetCurrentPattern($ip::Pattern)
+$btnIp.Invoke()
+"""
 
 
 class NTProcessManager:
@@ -66,15 +130,26 @@ class NTProcessManager:
             time.sleep(1)
         return False
 
-    def _build_start_args(self, exe: str) -> list:
-        args = [exe] + list(self.config.nt_start_args or [])
+    def _spawn_login_helper(self) -> None:
+        """Launch a detached PowerShell that watches for the NT login dialog and
+        types nt_username / nt_password. No-op if either is empty."""
         user = (self.config.nt_username or "").strip()
         pwd = (self.config.nt_password or "").strip()
-        if user:
-            args += ["-u", user]
-        if pwd:
-            args += ["-p", pwd]
-        return args
+        if not user or not pwd:
+            return
+        env = os.environ.copy()
+        env["NT_LOGIN_USER"] = user
+        env["NT_LOGIN_PWD"] = pwd
+        try:
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", _PS_LOGIN_SCRIPT],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            pass
 
     def start(self) -> bool:
         try:
@@ -82,12 +157,13 @@ class NTProcessManager:
         except Exception:
             return False
 
-        args = self._build_start_args(exe)
+        args = [exe] + list(self.config.nt_start_args or [])
         try:
             subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return True
         except Exception:
             return False
+        self._spawn_login_helper()
+        return True
 
     def restart(self, startup_grace_sec: int) -> bool:
         if not self.stop():
