@@ -284,11 +284,11 @@ namespace NinjaTrader.NinjaScript.AddOns
                 }
                 else if (method == "POST" && path == "/recover/reconnect")
                 {
-                    body = RecoverReconnectJson(false);
+                    body = RecoverReconnectJson(false, ctx.Request);
                 }
                 else if (method == "POST" && path == "/recover/flatten_then_reconnect")
                 {
-                    body = RecoverReconnectJson(true);
+                    body = RecoverReconnectJson(true, ctx.Request);
                 }
                 else
                 {
@@ -402,15 +402,70 @@ namespace NinjaTrader.NinjaScript.AddOns
         {
             var sb = new StringBuilder("[");
             bool first = true;
-            foreach (var conn in Connection.Connections)
+            var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string err;
+            bool ok = InvokeOnMainThreadWithTimeout(() =>
+            {
+                foreach (var conn in Connection.Connections)
+                {
+                    string name = "";
+                    string status = "Unknown";
+                    try { name = conn.Options != null ? conn.Options.Name : ""; } catch { }
+                    try { status = conn.Status.ToString(); } catch { }
+                    if (string.IsNullOrEmpty(name))
+                        name = "UnnamedConnection";
+                    seenNames.Add(name);
+
+                    if (!first) sb.Append(",");
+                    sb.Append("{");
+                    sb.Append("\"name\":\"").Append(JsonEscape(name)).Append("\",");
+                    sb.Append("\"status\":\"").Append(JsonEscape(status)).Append("\",");
+                    sb.Append("\"source\":\"runtime\"");
+                    sb.Append("}");
+                    first = false;
+                }
+
+                foreach (var option in GetConfiguredConnectionOptions())
+                {
+                    string name = GetAnyStringProperty(option, new[] { "Name", "DisplayName", "ConnectionName" });
+                    if (string.IsNullOrEmpty(name))
+                        continue;
+                    if (seenNames.Contains(name))
+                        continue;
+
+                    if (!first) sb.Append(",");
+                    sb.Append("{");
+                    sb.Append("\"name\":\"").Append(JsonEscape(name)).Append("\",");
+                    sb.Append("\"status\":\"Configured\",");
+                    sb.Append("\"source\":\"configured\"");
+                    sb.Append("}");
+                    first = false;
+                }
+
+                foreach (var name in GetConfiguredConnectionNamesFromConfig())
+                {
+                    if (string.IsNullOrEmpty(name))
+                        continue;
+                    if (seenNames.Contains(name))
+                        continue;
+                    seenNames.Add(name);
+
+                    if (!first) sb.Append(",");
+                    sb.Append("{");
+                    sb.Append("\"name\":\"").Append(JsonEscape(name)).Append("\",");
+                    sb.Append("\"status\":\"Configured\",");
+                    sb.Append("\"source\":\"config_xml\"");
+                    sb.Append("}");
+                    first = false;
+                }
+            }, 3000, out err);
+
+            if (!ok)
             {
                 if (!first) sb.Append(",");
-                sb.Append("{");
-                sb.Append("\"name\":\"").Append(JsonEscape(conn.Options.Name)).Append("\",");
-                sb.Append("\"status\":\"").Append(conn.Status).Append("\"");
-                sb.Append("}");
-                first = false;
+                sb.Append("{\"name\":\"error\",\"status\":\"").Append(JsonEscape(err)).Append("\",\"source\":\"bridge\"}");
             }
+
             sb.Append("]");
             return sb.ToString();
         }
@@ -609,7 +664,9 @@ namespace NinjaTrader.NinjaScript.AddOns
             int totalConnections = 0;
             int connectedConnections = 0;
             int unstableConnections = 0;
-            try
+            int configuredConnections = 0;
+            string connectionErr;
+            bool connectionsOk = InvokeOnMainThreadWithTimeout(() =>
             {
                 foreach (var conn in Connection.Connections)
                 {
@@ -622,8 +679,20 @@ namespace NinjaTrader.NinjaScript.AddOns
                         || status.IndexOf("Disconnected", StringComparison.OrdinalIgnoreCase) >= 0)
                         unstableConnections++;
                 }
-            }
-            catch { }
+                var configuredNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var option in GetConfiguredConnectionOptions())
+                {
+                    string optionName = GetAnyStringProperty(option, new[] { "Name", "DisplayName", "ConnectionName" });
+                    if (!string.IsNullOrEmpty(optionName))
+                        configuredNames.Add(optionName);
+                }
+                foreach (var name in GetConfiguredConnectionNamesFromConfig())
+                {
+                    if (!string.IsNullOrEmpty(name))
+                        configuredNames.Add(name);
+                }
+                configuredConnections = configuredNames.Count;
+            }, 3000, out connectionErr);
 
             int blockingCount;
             string blockingWindowsJson = GetBlockingWindowsJson(out blockingCount);
@@ -638,7 +707,10 @@ namespace NinjaTrader.NinjaScript.AddOns
             if (totalConnections == 0)
             {
                 if (statusLevel != "stuck") statusLevel = "degraded";
-                reasons.Add("no_connections_detected");
+                if (configuredConnections > 0)
+                    reasons.Add("all_connections_down");
+                else
+                    reasons.Add("no_connections_detected");
             }
             else if (connectedConnections == 0)
             {
@@ -660,6 +732,11 @@ namespace NinjaTrader.NinjaScript.AddOns
                 if (statusLevel != "stuck") statusLevel = "degraded";
                 reasons.Add("main_thread_ping_error");
             }
+            if (!connectionsOk)
+            {
+                if (statusLevel != "stuck") statusLevel = "degraded";
+                reasons.Add("connection_query_error");
+            }
 
             var sb = new StringBuilder("{");
             sb.Append("\"status\":\"").Append(statusLevel).Append("\",");
@@ -673,7 +750,9 @@ namespace NinjaTrader.NinjaScript.AddOns
             sb.Append("\"mainthread_error\":\"").Append(JsonEscape(_lastMainThreadError ?? "")).Append("\",");
             sb.Append("\"connections\":{\"total\":").Append(totalConnections)
                 .Append(",\"connected\":").Append(connectedConnections)
-                .Append(",\"unstable\":").Append(unstableConnections).Append("},");
+                .Append(",\"unstable\":").Append(unstableConnections)
+                .Append(",\"configured\":").Append(configuredConnections)
+                .Append("},");
             sb.Append("\"blocking_windows_count\":").Append(blockingCount).Append(",");
             sb.Append("\"blocking_windows\":").Append(blockingWindowsJson).Append(",");
             sb.Append("\"reasons\":[");
@@ -841,13 +920,15 @@ namespace NinjaTrader.NinjaScript.AddOns
             return sb.ToString();
         }
 
-        private string RecoverReconnectJson(bool flattenFirst)
+        private string RecoverReconnectJson(bool flattenFirst, HttpListenerRequest request)
         {
             var startedUtc = DateTime.UtcNow;
             Interlocked.Exchange(ref _lastRecoveryAttemptUtcTicks, startedUtc.Ticks);
             _lastRecoveryAction = flattenFirst ? "flatten_then_reconnect" : "reconnect";
             _lastRecoveryResult = "running";
             _lastRecoveryError = "";
+            var targetConnectionNames = ParseConnectionNames(request);
+            var targetNameSet = new HashSet<string>(targetConnectionNames, StringComparer.OrdinalIgnoreCase);
 
             int flattenAttempts = 0;
             int flattenSucceeded = 0;
@@ -857,6 +938,8 @@ namespace NinjaTrader.NinjaScript.AddOns
             int reconnectFailed = 0;
             int totalConnectionsSeen = 0;
             string opError = "";
+            int postTotalConnections = -1;
+            int postConnectedConnections = -1;
 
             string dispatcherErr;
             bool ok = InvokeOnMainThreadWithTimeout(() =>
@@ -880,19 +963,89 @@ namespace NinjaTrader.NinjaScript.AddOns
 
                 foreach (var conn in Connection.Connections)
                 {
+                    string connName = "";
+                    try { connName = conn.Options != null ? conn.Options.Name : ""; } catch { }
+                    if (!ConnectionNameMatchesFilter(connName, targetNameSet))
+                        continue;
                     totalConnectionsSeen++;
                     var status = conn.Status.ToString();
                     if (status.Equals("Connected", StringComparison.OrdinalIgnoreCase))
                         continue;
                     reconnectAttempts++;
                     string err;
-                    bool invoked = InvokeBestEffortNoArg(conn, new[] { "Reconnect", "Connect" }, out err);
+                    bool invoked = TryInvokeConnectMethodsOnTarget(conn, connName, null, out err);
                     if (invoked) reconnectSucceeded++;
                     else
                     {
                         reconnectFailed++;
                         if (!string.IsNullOrEmpty(err))
-                            opError = opError + (string.IsNullOrEmpty(opError) ? "" : " | ") + conn.Options.Name + ": " + err;
+                            opError = opError + (string.IsNullOrEmpty(opError) ? "" : " | ")
+                                + (string.IsNullOrEmpty(connName) ? "runtime_connection" : connName) + ": " + err;
+                    }
+                }
+
+                // Fallback: when no runtime connection instances exist, try configured options.
+                if (totalConnectionsSeen == 0)
+                {
+                    var attemptedConfiguredNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var option in GetConfiguredConnectionOptions())
+                    {
+                        string optionName = GetAnyStringProperty(option, new[] { "Name", "DisplayName", "ConnectionName" });
+                        if (!ConnectionNameMatchesFilter(optionName, targetNameSet))
+                            continue;
+                        totalConnectionsSeen++;
+                        reconnectAttempts++;
+                        if (!string.IsNullOrEmpty(optionName))
+                            attemptedConfiguredNames.Add(optionName);
+                        string err;
+                        bool invoked = TryConnectConfiguredOption(option, out err);
+                        if (invoked) reconnectSucceeded++;
+                        else
+                        {
+                            reconnectFailed++;
+                            if (!string.IsNullOrEmpty(err))
+                                opError = opError + (string.IsNullOrEmpty(opError) ? "" : " | ")
+                                    + (string.IsNullOrEmpty(optionName) ? "configured_connection" : optionName)
+                                    + ": " + err;
+                        }
+                    }
+
+                    bool triedNoArgConnect = false;
+                    var configuredNames = targetConnectionNames.Count > 0
+                        ? targetConnectionNames
+                        : GetConfiguredConnectionNamesFromConfig();
+                    foreach (var configuredName in configuredNames)
+                    {
+                        if (string.IsNullOrEmpty(configuredName))
+                            continue;
+                        if (attemptedConfiguredNames.Contains(configuredName))
+                            continue;
+                        totalConnectionsSeen++;
+                        reconnectAttempts++;
+                        string err;
+                        bool invoked = TryConnectConfiguredName(configuredName, out err);
+                        if (!invoked && !triedNoArgConnect && targetConnectionNames.Count == 0)
+                        {
+                            string fallbackErr;
+                            bool fallbackInvoked = TryConnectAnyConfiguredNoArg(out fallbackErr);
+                            triedNoArgConnect = true;
+                            if (fallbackInvoked)
+                            {
+                                invoked = true;
+                                err = "";
+                            }
+                            else if (!string.IsNullOrEmpty(fallbackErr))
+                            {
+                                err = string.IsNullOrEmpty(err) ? fallbackErr : (err + " | " + fallbackErr);
+                            }
+                        }
+                        if (invoked) reconnectSucceeded++;
+                        else
+                        {
+                            reconnectFailed++;
+                            if (!string.IsNullOrEmpty(err))
+                                opError = opError + (string.IsNullOrEmpty(opError) ? "" : " | ") + configuredName + ": " + err;
+                        }
                     }
                 }
             }, 10000, out dispatcherErr);
@@ -901,14 +1054,59 @@ namespace NinjaTrader.NinjaScript.AddOns
             if (totalConnectionsSeen == 0)
                 opError = string.IsNullOrEmpty(opError) ? "no connections available for reconnect" : opError + " | no connections available for reconnect";
 
-            bool success = ok && totalConnectionsSeen > 0 && reconnectFailed == 0 && (!flattenFirst || flattenFailed == 0);
+            string verifyErr = "";
+            bool verifyOk = false;
+            for (int i = 0; i < 4; i++)
+            {
+                Thread.Sleep(750);
+                int localTotal = 0;
+                int localConnected = 0;
+                string stepErr;
+                bool stepOk = InvokeOnMainThreadWithTimeout(() =>
+                {
+                    foreach (var conn in Connection.Connections)
+                    {
+                        localTotal++;
+                        var status = conn.Status.ToString();
+                        if (status.Equals("Connected", StringComparison.OrdinalIgnoreCase))
+                            localConnected++;
+                    }
+                }, 2000, out stepErr);
+                if (stepOk)
+                {
+                    verifyOk = true;
+                    postTotalConnections = localTotal;
+                    postConnectedConnections = localConnected;
+                    if (postConnectedConnections > 0)
+                        break;
+                }
+                else
+                {
+                    verifyErr = stepErr;
+                }
+            }
+            if (!verifyOk && !string.IsNullOrEmpty(verifyErr))
+                opError = string.IsNullOrEmpty(opError) ? verifyErr : opError + " | " + verifyErr;
+            if (verifyOk && postConnectedConnections <= 0)
+                opError = string.IsNullOrEmpty(opError)
+                    ? "reconnect_invoked_but_no_connected_runtime_connection"
+                    : opError + " | reconnect_invoked_but_no_connected_runtime_connection";
+
+            bool success = ok
+                && totalConnectionsSeen > 0
+                && reconnectFailed == 0
+                && (!flattenFirst || flattenFailed == 0)
+                && verifyOk
+                && postConnectedConnections > 0;
             _lastRecoveryResult = success ? "success" : "failed";
             _lastRecoveryError = opError;
             Log("recovery action " + (flattenFirst ? "flatten_then_reconnect" : "reconnect")
                 + " => " + (success ? "success" : "failed")
                 + " | total connections=" + totalConnectionsSeen
                 + " | reconnect attempted=" + reconnectAttempts + " failed=" + reconnectFailed
+                + " | post connections=" + postConnectedConnections + "/" + postTotalConnections
                 + " | flatten attempted=" + flattenAttempts + " failed=" + flattenFailed
+                + " | targets=" + (targetConnectionNames.Count > 0 ? string.Join(";", targetConnectionNames) : "all")
                 + (string.IsNullOrEmpty(opError) ? "" : " | error=" + opError));
 
             var elapsedMs = (DateTime.UtcNow - startedUtc).TotalMilliseconds;
@@ -917,6 +1115,14 @@ namespace NinjaTrader.NinjaScript.AddOns
             sb.Append("\"action\":\"").Append(flattenFirst ? "flatten_then_reconnect" : "reconnect").Append("\",");
             sb.Append("\"started_utc\":\"").Append(startedUtc.ToString("yyyy-MM-ddTHH:mm:ssZ")).Append("\",");
             sb.Append("\"elapsed_ms\":").Append(elapsedMs.ToString("F0")).Append(",");
+            sb.Append("\"target_connection_names\":[");
+            for (int i = 0; i < targetConnectionNames.Count; i++)
+            {
+                if (i > 0) sb.Append(",");
+                sb.Append("\"").Append(JsonEscape(targetConnectionNames[i])).Append("\"");
+            }
+            sb.Append("],");
+            sb.Append("\"post_check\":{\"total\":").Append(postTotalConnections).Append(",\"connected\":").Append(postConnectedConnections).Append("},");
             sb.Append("\"flatten\":{\"attempted\":").Append(flattenAttempts).Append(",\"succeeded\":").Append(flattenSucceeded).Append(",\"failed\":").Append(flattenFailed).Append("},");
             sb.Append("\"reconnect\":{\"attempted\":").Append(reconnectAttempts).Append(",\"succeeded\":").Append(reconnectSucceeded).Append(",\"failed\":").Append(reconnectFailed).Append("},");
             sb.Append("\"error\":\"").Append(JsonEscape(opError)).Append("\"");
@@ -1774,6 +1980,608 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
             error = "no matching method found";
             return false;
+        }
+
+        private List<string> ParseConnectionNames(HttpListenerRequest request)
+        {
+            var names = new List<string>();
+            if (request == null || !request.HasEntityBody)
+                return names;
+            try
+            {
+                string bodyText = "";
+                using (var reader = new StreamReader(request.InputStream, request.ContentEncoding ?? Encoding.UTF8))
+                    bodyText = reader.ReadToEnd();
+                if (string.IsNullOrWhiteSpace(bodyText))
+                    return names;
+                var parsed = _jsonSer.DeserializeObject(bodyText) as Dictionary<string, object>;
+                if (parsed == null)
+                    return names;
+
+                object rawNames;
+                if (!parsed.TryGetValue("connection_names", out rawNames) || rawNames == null)
+                    return names;
+
+                var arr = rawNames as System.Collections.ArrayList;
+                if (arr != null)
+                {
+                    foreach (var item in arr)
+                    {
+                        string value = (item ?? "").ToString().Trim();
+                        if (!string.IsNullOrEmpty(value)
+                            && !names.Exists(existing => existing.Equals(value, StringComparison.OrdinalIgnoreCase)))
+                            names.Add(value);
+                    }
+                    return names;
+                }
+
+                var enumerable = rawNames as System.Collections.IEnumerable;
+                if (enumerable != null && !(rawNames is string))
+                {
+                    foreach (var item in enumerable)
+                    {
+                        string value = (item ?? "").ToString().Trim();
+                        if (!string.IsNullOrEmpty(value)
+                            && !names.Exists(existing => existing.Equals(value, StringComparison.OrdinalIgnoreCase)))
+                            names.Add(value);
+                    }
+                    return names;
+                }
+
+                var asString = rawNames.ToString();
+                if (!string.IsNullOrEmpty(asString))
+                {
+                    foreach (var token in asString.Split(','))
+                    {
+                        string value = token.Trim();
+                        if (!string.IsNullOrEmpty(value)
+                            && !names.Exists(existing => existing.Equals(value, StringComparison.OrdinalIgnoreCase)))
+                            names.Add(value);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("recover request parse warning: " + ex.Message);
+            }
+            return names;
+        }
+
+        private bool ConnectionNameMatchesFilter(string connectionName, HashSet<string> filter)
+        {
+            if (filter == null || filter.Count == 0)
+                return true;
+            if (string.IsNullOrEmpty(connectionName))
+                return false;
+            return filter.Contains(connectionName);
+        }
+
+        private List<object> GetConfiguredConnectionOptions()
+        {
+            var options = new List<object>();
+            try
+            {
+                var connType = typeof(Connection);
+                foreach (var propertyName in new[] { "Options", "ConnectionOptions", "AvailableConnections" })
+                {
+                    var prop = connType.GetProperty(propertyName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                    if (prop == null)
+                        continue;
+                    var raw = prop.GetValue(null, null);
+                    var enumerable = raw as System.Collections.IEnumerable;
+                    if (enumerable == null)
+                        continue;
+                    foreach (var item in enumerable)
+                    {
+                        if (item != null)
+                            options.Add(item);
+                    }
+                    if (options.Count > 0)
+                        break;
+                }
+            }
+            catch { }
+            return options;
+        }
+
+        private bool TryConnectConfiguredOption(object option, out string error)
+        {
+            error = "";
+            if (option == null)
+            {
+                error = "connection option is null";
+                return false;
+            }
+            try
+            {
+                var connType = typeof(Connection);
+                var methods = connType.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                string optionName = GetAnyStringProperty(option, new[] { "Name", "DisplayName", "ConnectionName" });
+                foreach (var method in methods)
+                {
+                    if (!IsConnectMethodName(method.Name))
+                        continue;
+                    string err;
+                    if (TryInvokeConnectMethod(method, null, optionName, option, out err))
+                        return true;
+                }
+
+                if (TryInvokeConnectMethodsOnTarget(option, optionName, option, out error))
+                    return true;
+
+                string ccErr;
+                if (TryConnectViaControlCenter(optionName, out ccErr))
+                    return true;
+                if (!string.IsNullOrEmpty(ccErr))
+                    error = string.IsNullOrEmpty(error) ? ccErr : (error + " | " + ccErr);
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+            if (string.IsNullOrEmpty(error))
+                error = "no matching static/instance connect method found";
+            return false;
+        }
+
+        private bool TryConnectConfiguredName(string connectionName, out string error)
+        {
+            error = "";
+            if (string.IsNullOrEmpty(connectionName))
+            {
+                error = "connection name is empty";
+                return false;
+            }
+            try
+            {
+                var connType = typeof(Connection);
+                var methods = connType.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                foreach (var method in methods)
+                {
+                    if (!IsConnectMethodName(method.Name))
+                        continue;
+                    string err;
+                    if (TryInvokeConnectMethod(method, null, connectionName, null, out err))
+                        return true;
+                }
+
+                string ccErr;
+                if (TryConnectViaControlCenter(connectionName, out ccErr))
+                    return true;
+                if (!string.IsNullOrEmpty(ccErr))
+                    error = ccErr;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+            if (string.IsNullOrEmpty(error))
+                error = "no static connect(string) method found";
+            return false;
+        }
+
+        private bool TryConnectAnyConfiguredNoArg(out string error)
+        {
+            error = "";
+            try
+            {
+                var connType = typeof(Connection);
+                var methods = connType.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                foreach (var method in methods)
+                {
+                    if (!IsConnectMethodName(method.Name))
+                        continue;
+                    if (method.GetParameters().Length == 0)
+                    {
+                        method.Invoke(null, null);
+                        return true;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+            error = "no static connect() method found";
+            return false;
+        }
+
+        private bool TryInvokeConnectMethodsOnTarget(object target, string connectionName, object option, out string error)
+        {
+            error = "";
+            if (target == null)
+            {
+                error = "connect target is null";
+                return false;
+            }
+            try
+            {
+                var methods = target.GetType().GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                foreach (var method in methods)
+                {
+                    if (!IsConnectMethodName(method.Name))
+                        continue;
+                    string err;
+                    if (TryInvokeConnectMethod(method, target, connectionName, option, out err))
+                        return true;
+                    if (!string.IsNullOrEmpty(err))
+                        error = err;
+                }
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+
+            if (string.IsNullOrEmpty(error))
+                error = "no connect/reconnect instance method invocation succeeded";
+            return false;
+        }
+
+        private bool TryExecuteConnectCommands(object target, string connectionName, out string error)
+        {
+            error = "";
+            if (target == null)
+            {
+                error = "command target is null";
+                return false;
+            }
+            try
+            {
+                var props = target.GetType().GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                foreach (var prop in props)
+                {
+                    if (prop == null || !prop.CanRead || prop.PropertyType == null)
+                        continue;
+                    if (!typeof(System.Windows.Input.ICommand).IsAssignableFrom(prop.PropertyType))
+                        continue;
+                    if (!IsConnectMethodName(prop.Name))
+                        continue;
+
+                    var cmd = prop.GetValue(target, null) as System.Windows.Input.ICommand;
+                    if (cmd == null)
+                        continue;
+
+                    object preferredParam = string.IsNullOrEmpty(connectionName) ? null : (object)connectionName;
+                    if (preferredParam != null && cmd.CanExecute(preferredParam))
+                    {
+                        cmd.Execute(preferredParam);
+                        return true;
+                    }
+                    if (cmd.CanExecute(null))
+                    {
+                        cmd.Execute(null);
+                        return true;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+
+            error = "no connect command executed";
+            return false;
+        }
+
+        private bool IsConnectMethodName(string name)
+        {
+            if (string.IsNullOrEmpty(name))
+                return false;
+            if (name.IndexOf("disconnect", StringComparison.OrdinalIgnoreCase) >= 0)
+                return false;
+            return name.IndexOf("connect", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private bool TryConnectViaControlCenter(string connectionName, out string error)
+        {
+            error = "";
+            if (string.IsNullOrEmpty(connectionName))
+            {
+                error = "connection name is empty";
+                return false;
+            }
+            try
+            {
+                object controlCenter = null;
+                foreach (var w in NinjaTrader.Core.Globals.AllWindows)
+                {
+                    var fullName = w.GetType().FullName ?? "";
+                    if (fullName.IndexOf("ControlCenter", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        controlCenter = w;
+                        break;
+                    }
+                }
+                if (controlCenter == null)
+                {
+                    error = "control center not found";
+                    return false;
+                }
+
+                var targets = new List<object> { controlCenter };
+                object vm;
+                if (TryGetPropertyValue(controlCenter, "ViewModel", out vm) && vm != null)
+                    targets.Add(vm);
+
+                foreach (var target in targets)
+                {
+                    string targetErr;
+                    if (TryInvokeConnectMethodsOnTarget(target, connectionName, null, out targetErr))
+                        return true;
+                    if (!string.IsNullOrEmpty(targetErr))
+                        error = string.IsNullOrEmpty(error) ? targetErr : (error + " | " + targetErr);
+
+                    string commandErr;
+                    if (TryExecuteConnectCommands(target, connectionName, out commandErr))
+                        return true;
+                    if (!string.IsNullOrEmpty(commandErr))
+                        error = string.IsNullOrEmpty(error) ? commandErr : (error + " | " + commandErr);
+                }
+
+                string menuErr;
+                if (TryClickConnectionMenuItem(controlCenter, connectionName, out menuErr))
+                    return true;
+                if (!string.IsNullOrEmpty(menuErr))
+                    error = string.IsNullOrEmpty(error) ? menuErr : (error + " | " + menuErr);
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+
+            if (string.IsNullOrEmpty(error))
+                error = "control center connect invocation failed";
+            return false;
+        }
+
+        private bool TryClickConnectionMenuItem(object controlCenter, string connectionName, out string error)
+        {
+            error = "";
+            var root = controlCenter as System.Windows.DependencyObject;
+            if (root == null)
+            {
+                error = "control center visual root unavailable";
+                return false;
+            }
+
+            var menuItems = new List<System.Windows.Controls.MenuItem>();
+            CollectMenuItems(root, menuItems);
+            if (menuItems.Count == 0)
+            {
+                error = "no menu items found";
+                return false;
+            }
+
+            System.Windows.Controls.MenuItem connectionsMenu = null;
+            foreach (var item in menuItems)
+            {
+                if (NormalizeMenuToken(GetMenuHeader(item)).Equals("connections", StringComparison.Ordinal))
+                {
+                    connectionsMenu = item;
+                    break;
+                }
+            }
+            if (connectionsMenu == null)
+            {
+                error = "connections menu not found";
+                return false;
+            }
+
+            string targetToken = NormalizeMenuToken(connectionName);
+            var available = new List<string>();
+            foreach (var childObj in connectionsMenu.Items)
+            {
+                var child = childObj as System.Windows.Controls.MenuItem;
+                if (child == null)
+                    continue;
+                string childHeader = GetMenuHeader(child);
+                if (!string.IsNullOrEmpty(childHeader))
+                    available.Add(childHeader);
+                if (!NormalizeMenuToken(childHeader).Equals(targetToken, StringComparison.Ordinal))
+                    continue;
+
+                if (!child.IsEnabled)
+                {
+                    error = "connection menu item disabled: " + childHeader;
+                    return false;
+                }
+
+                try
+                {
+                    if (child.Command != null && child.Command.CanExecute(child.CommandParameter))
+                    {
+                        child.Command.Execute(child.CommandParameter);
+                        return true;
+                    }
+                }
+                catch { }
+
+                try
+                {
+                    child.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.MenuItem.ClickEvent, child));
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    error = "menu click failed: " + ex.Message;
+                    return false;
+                }
+            }
+
+            error = "connection menu item not found: " + connectionName
+                + (available.Count > 0 ? " (available: " + string.Join(", ", available) + ")" : "");
+            return false;
+        }
+
+        private void CollectMenuItems(object node, List<System.Windows.Controls.MenuItem> items)
+        {
+            if (node == null || items == null)
+                return;
+
+            var menuItem = node as System.Windows.Controls.MenuItem;
+            if (menuItem != null && !items.Contains(menuItem))
+                items.Add(menuItem);
+
+            var dep = node as System.Windows.DependencyObject;
+            if (dep == null)
+                return;
+
+            try
+            {
+                foreach (var child in System.Windows.LogicalTreeHelper.GetChildren(dep))
+                    CollectMenuItems(child, items);
+            }
+            catch { }
+
+            try
+            {
+                int childCount = System.Windows.Media.VisualTreeHelper.GetChildrenCount(dep);
+                for (int i = 0; i < childCount; i++)
+                {
+                    var visualChild = System.Windows.Media.VisualTreeHelper.GetChild(dep, i);
+                    CollectMenuItems(visualChild, items);
+                }
+            }
+            catch { }
+        }
+
+        private string GetMenuHeader(System.Windows.Controls.MenuItem item)
+        {
+            if (item == null || item.Header == null)
+                return "";
+            try
+            {
+                var str = item.Header as string;
+                if (!string.IsNullOrEmpty(str))
+                    return str.Trim();
+
+                var textProp = item.Header.GetType().GetProperty("Text");
+                if (textProp != null)
+                {
+                    var textValue = textProp.GetValue(item.Header, null);
+                    if (textValue != null)
+                        return textValue.ToString().Trim();
+                }
+                return item.Header.ToString().Trim();
+            }
+            catch
+            {
+                return "";
+            }
+        }
+
+        private string NormalizeMenuToken(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+                return "";
+            var sb = new StringBuilder();
+            foreach (var c in value)
+            {
+                if (char.IsLetterOrDigit(c))
+                    sb.Append(char.ToLowerInvariant(c));
+            }
+            return sb.ToString();
+        }
+
+        private bool TryInvokeConnectMethod(System.Reflection.MethodInfo method, object instance, string connectionName, object option, out string error)
+        {
+            error = "";
+            if (method == null)
+            {
+                error = "method is null";
+                return false;
+            }
+            try
+            {
+                var parameters = method.GetParameters();
+                var args = new object[parameters.Length];
+                var optionType = option != null ? option.GetType() : null;
+                for (int i = 0; i < parameters.Length; i++)
+                {
+                    var p = parameters[i];
+                    var t = p.ParameterType;
+                    object value = null;
+                    bool assigned = false;
+
+                    if (optionType != null && t.IsAssignableFrom(optionType))
+                    {
+                        value = option;
+                        assigned = true;
+                    }
+                    else if (t == typeof(string))
+                    {
+                        value = connectionName ?? "";
+                        assigned = true;
+                    }
+                    else if (t == typeof(bool))
+                    {
+                        value = true;
+                        assigned = true;
+                    }
+                    else if (t.IsValueType)
+                    {
+                        value = Activator.CreateInstance(t);
+                        assigned = true;
+                    }
+                    else if (!t.IsValueType)
+                    {
+                        value = null;
+                        assigned = true;
+                    }
+
+                    if (!assigned)
+                    {
+                        error = "unsupported parameter type " + t.FullName;
+                        return false;
+                    }
+                    args[i] = value;
+                }
+
+                method.Invoke(instance, args);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+                return false;
+            }
+        }
+
+        private List<string> GetConfiguredConnectionNamesFromConfig()
+        {
+            var names = new List<string>();
+            try
+            {
+                string configPath = Path.Combine(NinjaTrader.Core.Globals.UserDataDir, "config.xml");
+                if (!File.Exists(configPath))
+                    return names;
+
+                var doc = System.Xml.Linq.XDocument.Load(configPath);
+                var root = doc.Root;
+                if (root == null)
+                    return names;
+                var connectOptions = root.Element("ConnectOptions");
+                if (connectOptions == null)
+                    return names;
+                foreach (var optionNode in connectOptions.Elements())
+                {
+                    var nameNode = optionNode.Element("Name");
+                    if (nameNode == null)
+                        continue;
+                    string value = (nameNode.Value ?? "").Trim();
+                    if (!string.IsNullOrEmpty(value))
+                        names.Add(value);
+                }
+            }
+            catch { }
+            return names;
         }
 
         private string JsonEscape(string s)

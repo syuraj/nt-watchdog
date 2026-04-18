@@ -4,13 +4,17 @@ health_endpoint: "/healthz"
 runtime_snapshot_endpoint: "/runtime_snapshot"
 reconnect_endpoint: "/recover/reconnect"
 flatten_then_reconnect_endpoint: "/recover/flatten_then_reconnect"
+# Preferred NT connection names to target during reconnect attempts.
+connection_names:
+  - "My NinjaTrader"
 
 poll_interval_sec: 60
 startup_grace_sec: 90
 mainthread_stuck_sec: 12
 unstable_cycles_before_recovery: 3
-reconnect_attempt_limit: 3
+reconnect_attempt_limit: 10
 notification_cooldown_sec: 900
+no_connections_recovery_cooldown_sec: 300
 reconnect_cooldown_sec: 20
 restart_cooldown_sec: 120
 max_restarts_per_hour: 2

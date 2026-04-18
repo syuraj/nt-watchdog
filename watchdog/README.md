@@ -8,11 +8,13 @@ External watchdog service for NinjaTrader 8 running on a Windows VPS.
 - Uses NT/HealthBridge connection state only (no external internet probe checks).
 - Checks once per minute by default (`poll_interval_sec: 60`) to reduce log spam.
 - Reconnect-first recovery policy.
+- Allows targeting specific connection names via `connection_names` in config.
 - Open-position policy: flatten then recover.
 - Restart fallback with restart circuit breaker.
 - Persists last known good runtime snapshot.
 - Sends incident notifications to Telegram.
 - Deduplicates repeat incident alerts during cooldown (`notification_cooldown_sec`).
+- For `no_connections_detected`, uses reconnect-only recovery with cooldown guard (`no_connections_recovery_cooldown_sec`) and will not trigger NT process restart from this reason alone.
 
 ## Setup
 Python-first setup (recommended):

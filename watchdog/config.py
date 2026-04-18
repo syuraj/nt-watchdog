@@ -13,12 +13,14 @@ class WatchdogConfig:
     runtime_snapshot_endpoint: str = "/runtime_snapshot"
     reconnect_endpoint: str = "/recover/reconnect"
     flatten_then_reconnect_endpoint: str = "/recover/flatten_then_reconnect"
+    connection_names: List[str] = field(default_factory=list)
     poll_interval_sec: int = 60
     startup_grace_sec: int = 90
     mainthread_stuck_sec: int = 12
     unstable_cycles_before_recovery: int = 3
-    reconnect_attempt_limit: int = 3
+    reconnect_attempt_limit: int = 10
     notification_cooldown_sec: int = 900
+    no_connections_recovery_cooldown_sec: int = 300
     reconnect_cooldown_sec: int = 20
     restart_cooldown_sec: int = 120
     max_restarts_per_hour: int = 2
@@ -58,6 +60,16 @@ def _set_if_present(obj: WatchdogConfig, key: str, value) -> None:
     setattr(obj, key, value)
 
 
+def _to_list(value, default: List[str]) -> List[str]:
+    if value is None:
+        return list(default)
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return list(default)
+
+
 def load_config(path: str) -> WatchdogConfig:
     cfg = WatchdogConfig()
     base_dir = Path.cwd()
@@ -95,11 +107,25 @@ def load_config(path: str) -> WatchdogConfig:
     )
     _set_if_present(
         cfg,
+        "no_connections_recovery_cooldown_sec",
+        _to_int(
+            os.getenv("WATCHDOG_NO_CONNECTIONS_RECOVERY_COOLDOWN_SEC"),
+            cfg.no_connections_recovery_cooldown_sec,
+        ),
+    )
+    _set_if_present(
+        cfg,
         "unstable_cycles_before_recovery",
         _to_int(os.getenv("WATCHDOG_UNSTABLE_CYCLES"), cfg.unstable_cycles_before_recovery),
     )
+    _set_if_present(
+        cfg,
+        "connection_names",
+        _to_list(os.getenv("WATCHDOG_CONNECTION_NAMES"), cfg.connection_names),
+    )
 
     cfg.bridge_url = cfg.bridge_url.rstrip("/")
+    cfg.connection_names = _to_list(cfg.connection_names, [])
     snapshot_path = Path(cfg.snapshot_path)
     events_log_path = Path(cfg.events_log_path)
     if not snapshot_path.is_absolute():

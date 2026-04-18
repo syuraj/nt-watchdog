@@ -165,6 +165,24 @@ class RecoveryManager:
         self._notify("restore_manual_required", {"status": "degraded", "action": "manual_restore", "reason": message})
         return {"restored": False, "reason": message}
 
+    def _should_attempt_no_connections_recovery(self) -> bool:
+        cooldown = int(getattr(self.config, "no_connections_recovery_cooldown_sec", 0) or 0)
+        if cooldown <= 0:
+            return True
+        now = datetime.now(timezone.utc)
+        key = "last_no_connections_recovery_utc"
+        raw = self.runtime_state.get(key, "")
+        if isinstance(raw, str) and raw:
+            try:
+                ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if (now - ts).total_seconds() < cooldown:
+                    return False
+            except Exception:
+                pass
+        self.runtime_state[key] = _utc_now()
+        self._persist_runtime()
+        return True
+
     def handle_cycle(self, health: Dict[str, Any], runtime_snapshot: Dict[str, Any]) -> Dict[str, Any]:
         self.runtime_state = self.state_store.load_runtime_state()
 
@@ -201,24 +219,78 @@ class RecoveryManager:
 
         incident_id = self._get_incident_id()
 
-        # If NT reports no connection objects, do not spam reconnect/restart loops.
-        if isinstance(reasons, list) and "no_connections_detected" in reasons:
+        no_connections = isinstance(reasons, list) and "no_connections_detected" in reasons
+        if no_connections and not self._should_attempt_no_connections_recovery():
             result = {
                 "state": "degraded",
                 "action": "notify_only",
-                "reason": "no_connections_detected",
+                "reason": "no_connections_detected_cooldown",
                 "incident_id": incident_id,
             }
             self.state_store.append_event(result)
             notify_meta = self._notify(
                 "no_connections_detected",
-                {"status": status, "action": "notify_only", "reason": "no_connections_detected"},
+                {"status": status, "action": "notify_only", "reason": "no_connections_detected_cooldown"},
+            )
+            result.update(notify_meta)
+            return result
+
+        # Safety policy: if there are no NT connections, attempt reconnect only.
+        # Do not escalate to process restart from this reason alone.
+        if no_connections:
+            open_positions = self._has_open_positions(runtime_snapshot)
+            reconnect_result = self.bridge.recover_reconnect(
+                flatten_first=open_positions,
+                connection_names=self.config.connection_names,
+            )
+            reconnect_ok = bool(reconnect_result.get("success"))
+            self.state_store.append_event(
+                {
+                    "kind": "reconnect_attempt",
+                    "success": reconnect_ok,
+                    "open_positions": open_positions,
+                    "reason": "no_connections_detected",
+                    "details": reconnect_result,
+                }
+            )
+            if reconnect_ok:
+                self.runtime_state["reconnect_failures"] = 0
+                self._persist_runtime()
+                notify_meta = self._notify(
+                    "reconnect_success",
+                    {"status": status, "action": "reconnect", "reason": "no_connections_reconnect_success"},
+                )
+                result = {
+                    "state": "recovering",
+                    "action": "reconnect",
+                    "reason": "no_connections_reconnect_success",
+                    "incident_id": incident_id,
+                }
+                result.update(notify_meta)
+                return result
+
+            # Keep restart path disabled for no-connections incidents.
+            self.runtime_state["reconnect_failures"] = 0
+            self._persist_runtime()
+            result = {
+                "state": "degraded",
+                "action": "notify_only",
+                "reason": "no_connections_reconnect_failed",
+                "incident_id": incident_id,
+            }
+            self.state_store.append_event(result)
+            notify_meta = self._notify(
+                "no_connections_detected",
+                {"status": status, "action": "notify_only", "reason": "no_connections_reconnect_failed"},
             )
             result.update(notify_meta)
             return result
 
         open_positions = self._has_open_positions(runtime_snapshot)
-        reconnect_result = self.bridge.recover_reconnect(flatten_first=open_positions)
+        reconnect_result = self.bridge.recover_reconnect(
+            flatten_first=open_positions,
+            connection_names=self.config.connection_names,
+        )
         reconnect_ok = bool(reconnect_result.get("success"))
         self.state_store.append_event(
             {

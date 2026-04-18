@@ -4,7 +4,7 @@ import json
 import socket
 import urllib.error
 import urllib.request
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .config import WatchdogConfig
 
@@ -47,14 +47,18 @@ class BridgeClient:
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError) as exc:
             return {"error": str(exc)}
 
-    def recover_reconnect(self, flatten_first: bool) -> Dict[str, Any]:
+    def recover_reconnect(self, flatten_first: bool, connection_names: Optional[List[str]] = None) -> Dict[str, Any]:
         endpoint = (
             self.config.flatten_then_reconnect_endpoint
             if flatten_first
             else self.config.reconnect_endpoint
         )
+        body: Dict[str, Any] = {}
+        names = connection_names if connection_names is not None else self.config.connection_names
+        if names:
+            body["connection_names"] = names
         try:
-            return self.post_json(endpoint, body={}, timeout_sec=12)
+            return self.post_json(endpoint, body=body, timeout_sec=12)
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError) as exc:
             return {"success": False, "error": str(exc), "action": endpoint}
 

@@ -13,6 +13,8 @@ Default bridge port is `8899` (to avoid conflicts with other tools on `8888`).
 - Uses NT connection state only for health/recovery decisions (no external internet probe dependency).
 - Runs health checks once per minute by default (`poll_interval_sec: 60`) to reduce log noise.
 - Attempts staged recovery (reconnect first, restart fallback with circuit breaker).
+- For `no_connections_detected`, attempts reconnect-only recovery with a dedicated cooldown (`no_connections_recovery_cooldown_sec`) and does not escalate to NT process restart from that reason alone.
+- Supports configured reconnect targets via `connection_names` in `watchdog/config.yaml` (for example `My NinjaTrader`).
 - Saves last-known-good runtime snapshot for restore workflows.
 - Logs watchdog events to `watchdog/logs/health_events.jsonl`.
 
@@ -28,6 +30,10 @@ Default bridge port is `8899` (to avoid conflicts with other tools on `8888`).
 5. Start watchdog:
    - `python scripts/manage_watchdog.py run`
 
+Optional env overrides:
+- `setx WATCHDOG_NO_CONNECTIONS_RECOVERY_COOLDOWN_SEC "300"`
+- `setx WATCHDOG_NOTIFICATION_COOLDOWN_SEC "900"`
+
 ## Verify
 - Bridge liveness:
   - `http://localhost:8899/health`
@@ -35,6 +41,10 @@ Default bridge port is `8899` (to avoid conflicts with other tools on `8888`).
   - `http://localhost:8899/healthz`
 - One-shot combined status:
   - `python scripts/manage_watchdog.py status`
+- JSON status:
+  - `python scripts/manage_watchdog.py status --json`
+- Mock smoke test:
+  - `python scripts/manage_watchdog.py smoke-test --cleanup`
 
 ## Startup On Login
 - `python scripts/manage_watchdog.py install-startup`
