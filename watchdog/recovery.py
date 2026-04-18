@@ -292,14 +292,35 @@ class RecoveryManager:
             connection_names=self.config.connection_names,
         )
         reconnect_ok = bool(reconnect_result.get("success"))
+        # Bridge transport failure (NT process dead, bridge not yet listening) is not a
+        # reconnect-logic failure — shouldn't count against reconnect_attempt_limit or
+        # escalate to restart. The monitor-loop bootstrap path handles dead-process case.
+        err_text = str(reconnect_result.get("error", "") or "").lower()
+        bridge_unreachable = (not reconnect_ok) and (
+            "urlopen error" in err_text
+            or "winerror 10061" in err_text
+            or "connection refused" in err_text
+            or "actively refused" in err_text
+        )
         self.state_store.append_event(
             {
                 "kind": "reconnect_attempt",
                 "success": reconnect_ok,
                 "open_positions": open_positions,
+                "bridge_unreachable": bridge_unreachable,
                 "details": reconnect_result,
             }
         )
+        if bridge_unreachable:
+            # Skip counter increment + escalation; wait for bootstrap path to revive NT.
+            result = {
+                "state": "degraded",
+                "action": "wait_for_bridge",
+                "reason": "bridge_unreachable",
+                "incident_id": incident_id,
+                "sleep_override_sec": self.config.poll_interval_sec,
+            }
+            return result
         if reconnect_ok:
             self.runtime_state["reconnect_failures"] = 0
             self._persist_runtime()

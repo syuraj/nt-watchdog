@@ -86,6 +86,19 @@ def run_watchdog(config: WatchdogConfig, max_cycles: int = 0) -> None:
     try:
         started = time.time()
         print(f"[{_now()}] watchdog started. bridge={config.bridge_url}")
+        # Clear stale per-incident counters from a prior run. Without this, a crashed
+        # watchdog's leftover reconnect_failures can push the first post-restart cycle
+        # straight into the restart-escalation branch, killing NT without ever trying
+        # a reconnect first.
+        try:
+            stale_state = state_store.load_runtime_state()
+            if stale_state.get("reconnect_failures") or stale_state.get("last_incident_id"):
+                stale_state["reconnect_failures"] = 0
+                stale_state["last_incident_id"] = ""
+                state_store.save_runtime_state(stale_state)
+                print(f"[{_now()}] cleared stale incident state from prior run")
+        except Exception as exc:
+            print(f"[{_now()}] warn: could not clear stale state: {exc}")
         cycle_num = 0
         while True:
             cycle_num += 1
