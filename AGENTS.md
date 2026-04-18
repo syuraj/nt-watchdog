@@ -121,6 +121,7 @@ Key paths:
 - **Do not reintroduce Task Scheduler logic** unless explicitly requested — startup uses user-login launcher, no admin.
 - Keep `status` concise by default; detail behind `--verbose` / `--json`.
 - Alert send failures must be visible in both terminal output and event log.
+- **In `HealthBridge.cs`, always prefer reflection** over hardcoded NT API calls. NT8 internals vary across versions; reflection keeps the bridge resilient when NT changes a type or method signature. Fall back to direct calls only when reflection is genuinely infeasible.
 
 ## Installing Bridge Changes
 

@@ -40,6 +40,10 @@ namespace NinjaTrader.NinjaScript.AddOns
         private volatile bool _heartbeatRunning;
         private const int DefaultPort = 8899;
         private readonly string _listenUrl = BuildListenUrl();
+        // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
+        // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
+        // Format: UTC timestamp at edit time.
+        private const string BuildId = "2026-04-18T18:45:00Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -296,7 +300,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                     {
                         case "/":
                         case "/health":
-                            body = "{\"status\":\"ok\",\"service\":\"HealthBridge\",\"version\":\"0.4.0\"}";
+                            body = "{\"status\":\"ok\",\"service\":\"HealthBridge\",\"version\":\"0.4.0\",\"build_id\":\"" + BuildId + "\"}";
                             break;
                         case "/accounts":
                             body = GetAccountsJson();
@@ -742,6 +746,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             sb.Append("\"status\":\"").Append(statusLevel).Append("\",");
             sb.Append("\"service\":\"HealthBridge\",");
             sb.Append("\"version\":\"0.4.0\",");
+            sb.Append("\"build_id\":\"").Append(BuildId).Append("\",");
             sb.Append("\"now_utc\":\"").Append(nowUtc.ToString("yyyy-MM-ddTHH:mm:ssZ")).Append("\",");
             sb.Append("\"uptime_sec\":").Append(uptimeSec.ToString("F0")).Append(",");
             sb.Append("\"request_age_sec\":").Append(requestAgeSec.ToString("F1")).Append(",");
@@ -940,6 +945,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             string opError = "";
             int postTotalConnections = -1;
             int postConnectedConnections = -1;
+            var debugTrail = new List<string>();
 
             string dispatcherErr;
             bool ok = InvokeOnMainThreadWithTimeout(() =>
@@ -1023,7 +1029,10 @@ namespace NinjaTrader.NinjaScript.AddOns
                         totalConnectionsSeen++;
                         reconnectAttempts++;
                         string err;
-                        bool invoked = TryConnectConfiguredName(configuredName, out err);
+                        string pathTag;
+                        bool invoked = TryConnectConfiguredName(configuredName, out err, out pathTag);
+                        if (invoked)
+                            debugTrail.Add(configuredName + "=>" + pathTag);
                         if (!invoked && !triedNoArgConnect && targetConnectionNames.Count == 0)
                         {
                             string fallbackErr;
@@ -1033,6 +1042,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                             {
                                 invoked = true;
                                 err = "";
+                                debugTrail.Add(configuredName + "=>noarg_static");
                             }
                             else if (!string.IsNullOrEmpty(fallbackErr))
                             {
@@ -1125,6 +1135,13 @@ namespace NinjaTrader.NinjaScript.AddOns
             sb.Append("\"post_check\":{\"total\":").Append(postTotalConnections).Append(",\"connected\":").Append(postConnectedConnections).Append("},");
             sb.Append("\"flatten\":{\"attempted\":").Append(flattenAttempts).Append(",\"succeeded\":").Append(flattenSucceeded).Append(",\"failed\":").Append(flattenFailed).Append("},");
             sb.Append("\"reconnect\":{\"attempted\":").Append(reconnectAttempts).Append(",\"succeeded\":").Append(reconnectSucceeded).Append(",\"failed\":").Append(reconnectFailed).Append("},");
+            sb.Append("\"debug_trail\":[");
+            for (int i = 0; i < debugTrail.Count; i++)
+            {
+                if (i > 0) sb.Append(",");
+                sb.Append("\"").Append(JsonEscape(debugTrail[i])).Append("\"");
+            }
+            sb.Append("],");
             sb.Append("\"error\":\"").Append(JsonEscape(opError)).Append("\"");
             sb.Append("}");
             return sb.ToString();
@@ -2056,6 +2073,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             return filter.Contains(connectionName);
         }
 
+
         private List<object> GetConfiguredConnectionOptions()
         {
             var options = new List<object>();
@@ -2127,7 +2145,14 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         private bool TryConnectConfiguredName(string connectionName, out string error)
         {
+            string path;
+            return TryConnectConfiguredName(connectionName, out error, out path);
+        }
+
+        private bool TryConnectConfiguredName(string connectionName, out string error, out string path)
+        {
             error = "";
+            path = "";
             if (string.IsNullOrEmpty(connectionName))
             {
                 error = "connection name is empty";
@@ -2135,6 +2160,18 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
             try
             {
+                // Prefer Control Center UI path — static reflection finds Connect(string) methods
+                // that return without throwing but never materialize a runtime Connection.
+                string ccErr;
+                if (TryConnectViaControlCenter(connectionName, out ccErr))
+                {
+                    path = string.IsNullOrEmpty(_lastControlCenterPath) ? "control_center" : _lastControlCenterPath;
+                    Log("reconnect path: " + path + " succeeded for " + connectionName);
+                    return true;
+                }
+                if (!string.IsNullOrEmpty(ccErr))
+                    error = ccErr;
+
                 var connType = typeof(Connection);
                 var methods = connType.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
                 foreach (var method in methods)
@@ -2143,14 +2180,12 @@ namespace NinjaTrader.NinjaScript.AddOns
                         continue;
                     string err;
                     if (TryInvokeConnectMethod(method, null, connectionName, null, out err))
-                        return true;
+                        {
+                            path = "static:" + method.DeclaringType.Name + "." + method.Name + "(" + method.GetParameters().Length + ")";
+                            Log("reconnect path: static_reflection " + method.DeclaringType.FullName + "." + method.Name + " succeeded for " + connectionName);
+                            return true;
+                        }
                 }
-
-                string ccErr;
-                if (TryConnectViaControlCenter(connectionName, out ccErr))
-                    return true;
-                if (!string.IsNullOrEmpty(ccErr))
-                    error = ccErr;
             }
             catch (Exception ex)
             {
@@ -2278,8 +2313,11 @@ namespace NinjaTrader.NinjaScript.AddOns
             return name.IndexOf("connect", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
+        private string _lastControlCenterPath = "";
+
         private bool TryConnectViaControlCenter(string connectionName, out string error)
         {
+            _lastControlCenterPath = "";
             error = "";
             if (string.IsNullOrEmpty(connectionName))
             {
@@ -2309,24 +2347,68 @@ namespace NinjaTrader.NinjaScript.AddOns
                 if (TryGetPropertyValue(controlCenter, "ViewModel", out vm) && vm != null)
                     targets.Add(vm);
 
-                foreach (var target in targets)
+                // Preferred: Connection.Connect(ConnectOptions) — the canonical NT API.
+                string apiErr;
+                if (TryConnectViaCbiApi(connectionName, out apiErr))
                 {
-                    string targetErr;
-                    if (TryInvokeConnectMethodsOnTarget(target, connectionName, null, out targetErr))
-                        return true;
-                    if (!string.IsNullOrEmpty(targetErr))
-                        error = string.IsNullOrEmpty(error) ? targetErr : (error + " | " + targetErr);
-
-                    string commandErr;
-                    if (TryExecuteConnectCommands(target, connectionName, out commandErr))
-                        return true;
-                    if (!string.IsNullOrEmpty(commandErr))
-                        error = string.IsNullOrEmpty(error) ? commandErr : (error + " | " + commandErr);
+                    _lastControlCenterPath = "cbi_api";
+                    return true;
+                }
+                if (!string.IsNullOrEmpty(apiErr))
+                {
+                    _lastControlCenterPath = "cbi_api_fail:" + apiErr;
+                    error = string.IsNullOrEmpty(error) ? apiErr : (error + " | " + apiErr);
                 }
 
+                // Fallback: click the Connections submenu item via reflection.
+                string directErr;
+                if (TryClickConnectionsSubmenuItem(controlCenter, connectionName, out directErr))
+                {
+                    _lastControlCenterPath = "cc_direct_click:" + (string.IsNullOrEmpty(_lastDirectClickDetail) ? "ok" : _lastDirectClickDetail);
+                    return true;
+                }
+                if (!string.IsNullOrEmpty(directErr))
+                {
+                    _lastControlCenterPath = "direct_fail:" + directErr;
+                    error = string.IsNullOrEmpty(error) ? directErr : (error + " | " + directErr);
+                }
+
+                // Visual-tree menu-click fallback (requires realized visual tree).
                 string menuErr;
                 if (TryClickConnectionMenuItem(controlCenter, connectionName, out menuErr))
+                {
+                    _lastControlCenterPath = "cc_menu_click";
                     return true;
+                }
+                if (!string.IsNullOrEmpty(menuErr))
+                {
+                    _lastControlCenterPath = "menu_fail:" + menuErr;
+                    error = string.IsNullOrEmpty(error) ? menuErr : (error + " | " + menuErr);
+                }
+
+                string priorMenuFail = _lastControlCenterPath;
+                foreach (var target in targets)
+                {
+                    string commandErr;
+                    if (TryExecuteConnectCommands(target, connectionName, out commandErr))
+                    {
+                        _lastControlCenterPath = "cc_command:" + target.GetType().Name
+                            + (string.IsNullOrEmpty(priorMenuFail) ? "" : " (after " + priorMenuFail + ")");
+                        return true;
+                    }
+                    if (!string.IsNullOrEmpty(commandErr))
+                        error = string.IsNullOrEmpty(error) ? commandErr : (error + " | " + commandErr);
+
+                    string targetErr;
+                    if (TryInvokeConnectMethodsOnTarget(target, connectionName, null, out targetErr))
+                    {
+                        _lastControlCenterPath = "cc_instance_method:" + target.GetType().Name
+                            + (string.IsNullOrEmpty(priorMenuFail) ? "" : " (after " + priorMenuFail + ")");
+                        return true;
+                    }
+                    if (!string.IsNullOrEmpty(targetErr))
+                        error = string.IsNullOrEmpty(error) ? targetErr : (error + " | " + targetErr);
+                }
                 if (!string.IsNullOrEmpty(menuErr))
                     error = string.IsNullOrEmpty(error) ? menuErr : (error + " | " + menuErr);
             }
@@ -2338,6 +2420,190 @@ namespace NinjaTrader.NinjaScript.AddOns
 
             if (string.IsNullOrEmpty(error))
                 error = "control center connect invocation failed";
+            return false;
+        }
+
+        private string _lastDirectClickDetail = "";
+
+        private bool TryConnectViaCbiApi(string connectionName, out string error)
+        {
+            error = "";
+            try
+            {
+                // Get Core.Globals.ConnectOptions — Collection<ConnectOptions>
+                var globalsType = typeof(NinjaTrader.Core.Globals);
+                var connOptsProp = globalsType.GetProperty("ConnectOptions", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                if (connOptsProp == null) { error = "Globals.ConnectOptions prop missing"; return false; }
+                var connOpts = connOptsProp.GetValue(null, null) as System.Collections.IEnumerable;
+                if (connOpts == null) { error = "Globals.ConnectOptions null"; return false; }
+
+                object match = null;
+                var available = new List<string>();
+                foreach (var opt in connOpts)
+                {
+                    if (opt == null) continue;
+                    string nm = GetAnyStringProperty(opt, new[] { "Name", "DisplayName", "ConnectionName" });
+                    if (!string.IsNullOrEmpty(nm)) available.Add(nm);
+                    if (string.Equals(nm, connectionName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        match = opt;
+                        break;
+                    }
+                }
+                if (match == null)
+                {
+                    error = "no ConnectOptions matching '" + connectionName + "' (available: " + string.Join(",", available) + ")";
+                    return false;
+                }
+
+                // Find Connection.Connect(ConnectOptions) static method
+                var connType = typeof(NinjaTrader.Cbi.Connection);
+                System.Reflection.MethodInfo connectMethod = null;
+                foreach (var m in connType.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static))
+                {
+                    if (m.Name != "Connect") continue;
+                    var ps = m.GetParameters();
+                    if (ps.Length == 1 && ps[0].ParameterType.IsAssignableFrom(match.GetType()))
+                    {
+                        connectMethod = m;
+                        break;
+                    }
+                }
+                if (connectMethod == null) { error = "Connection.Connect(ConnectOptions) not found"; return false; }
+
+                connectMethod.Invoke(null, new object[] { match });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+                return false;
+            }
+        }
+
+        private bool TryClickConnectionsSubmenuItem(object controlCenter, string connectionName, out string error)
+        {
+            error = "";
+            _lastDirectClickDetail = "";
+            var win = controlCenter as System.Windows.Window;
+            if (win == null) { error = "cc not a Window"; return false; }
+
+            object cmi = null;
+            try
+            {
+                var fld = controlCenter.GetType().GetField("connectionsMenuItem",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (fld == null) { error = "connectionsMenuItem field not found"; return false; }
+                cmi = fld.GetValue(controlCenter);
+                if (cmi == null) { error = "connectionsMenuItem is null"; return false; }
+            }
+            catch (Exception ex) { error = "cmi_read:" + ex.Message; return false; }
+
+            bool clicked = false;
+            string innerErr = "";
+            var available = new List<string>();
+            try
+            {
+                win.Dispatcher.Invoke(new Action(() =>
+                {
+                    try
+                    {
+                        var itemsProp = cmi.GetType().GetProperty("Items");
+                        var items = itemsProp == null ? null : itemsProp.GetValue(cmi, null) as System.Collections.IEnumerable;
+                        if (items == null) { innerErr = "Items enumerable null"; return; }
+                        string target = NormalizeMenuToken(connectionName);
+                        foreach (var child in items)
+                        {
+                            var mi = child as System.Windows.Controls.MenuItem;
+                            if (mi == null) continue;
+                            string hdr = GetMenuHeader(mi);
+                            if (!string.IsNullOrEmpty(hdr)) available.Add(hdr);
+                            if (!NormalizeMenuToken(hdr).Equals(target, StringComparison.Ordinal)) continue;
+
+                            // If DataContext is a ConnectionOptions-like object, invoke its Connect() directly
+                            try
+                            {
+                                var dc = mi.DataContext;
+                                if (dc != null)
+                                {
+                                    var mm = dc.GetType().GetMethod("Connect", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance, null, Type.EmptyTypes, null);
+                                    if (mm != null)
+                                    {
+                                        mm.Invoke(dc, null);
+                                        _lastDirectClickDetail = "via_dc_connect";
+                                        clicked = true;
+                                        return;
+                                    }
+                                }
+                                var tg = mi.Tag;
+                                if (tg != null)
+                                {
+                                    var mm = tg.GetType().GetMethod("Connect", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance, null, Type.EmptyTypes, null);
+                                    if (mm != null)
+                                    {
+                                        mm.Invoke(tg, null);
+                                        _lastDirectClickDetail = "via_tag_connect";
+                                        clicked = true;
+                                        return;
+                                    }
+                                }
+                            }
+                            catch (Exception dcex) { innerErr = "dc_connect:" + (dcex.InnerException != null ? dcex.InnerException.Message : dcex.Message); }
+
+                            // Try Command first (clean path)
+                            try
+                            {
+                                if (mi.Command != null && mi.Command.CanExecute(mi.CommandParameter))
+                                {
+                                    mi.Command.Execute(mi.CommandParameter);
+                                    _lastDirectClickDetail = "via_command";
+                                    clicked = true;
+                                    return;
+                                }
+                            }
+                            catch (Exception cex) { innerErr = "cmd:" + cex.Message; }
+
+                            // Invoke protected MenuItem.OnClick() via reflection — this is what WPF
+                            // calls internally when user clicks, and triggers the Click event + handlers.
+                            try
+                            {
+                                var onClick = typeof(System.Windows.Controls.MenuItem).GetMethod("OnClick",
+                                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+                                    null, Type.EmptyTypes, null);
+                                if (onClick != null)
+                                {
+                                    onClick.Invoke(mi, null);
+                                    _lastDirectClickDetail = "via_onclick";
+                                    clicked = true;
+                                    return;
+                                }
+                                else
+                                {
+                                    innerErr = "OnClick method not found";
+                                }
+                            }
+                            catch (Exception ocex) { innerErr = "onclick:" + (ocex.InnerException != null ? ocex.InnerException.Message : ocex.Message); }
+
+                            // Last resort: raise routed event (often ignored by code-behind handlers)
+                            try
+                            {
+                                mi.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.MenuItem.ClickEvent, mi));
+                                _lastDirectClickDetail = "via_raise";
+                                clicked = true;
+                                return;
+                            }
+                            catch (Exception rex) { innerErr = "raise:" + rex.Message; }
+                        }
+                    }
+                    catch (Exception ex) { innerErr = "iter:" + ex.Message; }
+                }));
+            }
+            catch (Exception ex) { error = "dispatch:" + ex.Message; return false; }
+
+            if (clicked) return true;
+            error = string.IsNullOrEmpty(innerErr)
+                ? "target not found (available: " + string.Join(",", available) + ")"
+                : innerErr;
             return false;
         }
 
