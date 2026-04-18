@@ -52,11 +52,13 @@ class NTProcessManager:
     def stop(self, timeout_sec: int = 30) -> bool:
         if not self.is_running():
             return True
-        try:
-            subprocess.check_call(["taskkill", "/IM", f"{self.config.nt_process_name}.exe", "/T", "/F"])
-        except Exception:
-            return False
-
+        # taskkill /T /F often returns non-zero when some children already exited.
+        # Ignore its exit code and poll is_running() instead — that's the actual signal.
+        subprocess.run(
+            ["taskkill", "/IM", f"{self.config.nt_process_name}.exe", "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         deadline = time.time() + timeout_sec
         while time.time() < deadline:
             if not self.is_running():
@@ -64,13 +66,23 @@ class NTProcessManager:
             time.sleep(1)
         return False
 
+    def _build_start_args(self, exe: str) -> list:
+        args = [exe] + list(self.config.nt_start_args or [])
+        user = (self.config.nt_username or "").strip()
+        pwd = (self.config.nt_password or "").strip()
+        if user:
+            args += ["-u", user]
+        if pwd:
+            args += ["-p", pwd]
+        return args
+
     def start(self) -> bool:
         try:
             exe = self.resolve_executable_path()
         except Exception:
             return False
 
-        args = [exe] + list(self.config.nt_start_args or [])
+        args = self._build_start_args(exe)
         try:
             subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return True

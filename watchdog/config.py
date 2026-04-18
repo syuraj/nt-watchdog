@@ -25,9 +25,11 @@ class WatchdogConfig:
     restart_cooldown_sec: int = 120
     max_restarts_per_hour: int = 2
     recovery_only_when_flat: bool = False
-    nt_executable_path: str = r"C:\Program Files\NinjaTrader 8\bin64\NinjaTrader.exe"
+    nt_executable_path: str = r"C:\Program Files\NinjaTrader 8\bin\NinjaTrader.exe"
     nt_process_name: str = "NinjaTrader"
     nt_start_args: List[str] = field(default_factory=list)
+    nt_username: str = ""
+    nt_password: str = ""
     process_detect_fallback: bool = True
     snapshot_path: str = "watchdog/state/last_good_snapshot.json"
     events_log_path: str = "watchdog/logs/health_events.jsonl"
@@ -96,6 +98,8 @@ def load_config(path: str) -> WatchdogConfig:
 
     _set_if_present(cfg, "bridge_url", os.getenv("NT8_BRIDGE_URL"))
     _set_if_present(cfg, "nt_executable_path", os.getenv("NT8_EXECUTABLE_PATH"))
+    _set_if_present(cfg, "nt_username", os.getenv("WATCHDOG_NT_USERNAME"))
+    _set_if_present(cfg, "nt_password", os.getenv("WATCHDOG_NT_PASSWORD"))
     _set_if_present(cfg, "telegram_bot_token", os.getenv("TELEGRAM_BOT_TOKEN"))
     _set_if_present(cfg, "telegram_chat_id", os.getenv("TELEGRAM_CHAT_ID"))
     _set_if_present(cfg, "telegram_enabled", _to_bool(os.getenv("TELEGRAM_ENABLED"), cfg.telegram_enabled))

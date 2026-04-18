@@ -23,9 +23,13 @@ max_restarts_per_hour: 2
 recovery_only_when_flat: false
 
 # Primary executable path from user-provided fixed path.
-nt_executable_path: "C:\\Program Files\\NinjaTrader 8\\bin64\\NinjaTrader.exe"
+nt_executable_path: "C:\\Program Files\\NinjaTrader 8\\bin\\NinjaTrader.exe"
 nt_process_name: "NinjaTrader"
 nt_start_args: []
+# NT login credentials passed as -u/-p args on start. Prefer env vars
+# WATCHDOG_NT_USERNAME / WATCHDOG_NT_PASSWORD over keeping them in the file.
+nt_username: ""
+nt_password: ""
 process_detect_fallback: true
 
 snapshot_path: "watchdog/state/last_good_snapshot.json"
