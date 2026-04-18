@@ -1,0 +1,173 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+from typing import Any, Dict, List
+
+from watchdog.config import WatchdogConfig
+from watchdog.recovery import RecoveryManager
+from watchdog.state_store import StateStore
+
+
+class FakeBridge:
+    def __init__(self, reconnect_results: List[Dict[str, Any]]) -> None:
+        self.reconnect_results = reconnect_results
+        self.calls = 0
+
+    def recover_reconnect(self, flatten_first: bool) -> Dict[str, Any]:
+        idx = self.calls
+        self.calls += 1
+        if idx >= len(self.reconnect_results):
+            return {"success": False, "error": "no more fake responses"}
+        return self.reconnect_results[idx]
+
+
+class FakeProcessManager:
+    def __init__(self, restart_ok: bool = True) -> None:
+        self.restart_ok = restart_ok
+        self.restart_calls = 0
+
+    def restart(self, startup_grace_sec: int) -> bool:
+        self.restart_calls += 1
+        return self.restart_ok
+
+
+class FakeNotifier:
+    def __init__(self) -> None:
+        self.events: List[Dict[str, Any]] = []
+
+    def notify_event(self, event_type: str, incident_id: str, details: Dict[str, Any]) -> bool:
+        self.events.append(
+            {"event_type": event_type, "incident_id": incident_id, "details": details}
+        )
+        return True
+
+
+class RecoveryTests(unittest.TestCase):
+    def _build_config(self, temp_dir: str) -> WatchdogConfig:
+        return WatchdogConfig(
+            reconnect_attempt_limit=1,
+            restart_cooldown_sec=1,
+            max_restarts_per_hour=5,
+            snapshot_path=str(Path(temp_dir) / "state" / "snapshot.json"),
+            events_log_path=str(Path(temp_dir) / "logs" / "events.jsonl"),
+            telegram_enabled=False,
+        )
+
+    def test_reconnect_success(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            state = StateStore(cfg)
+            bridge = FakeBridge([{"success": True, "action": "reconnect"}])
+            process = FakeProcessManager(restart_ok=True)
+            notifier = FakeNotifier()
+
+            manager = RecoveryManager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=notifier,  # type: ignore[arg-type]
+            )
+            result = manager.handle_cycle(
+                health={"status": "degraded", "reasons": ["connection_unstable"]},
+                runtime_snapshot={"positions": []},
+            )
+
+            self.assertEqual(result["action"], "reconnect")
+            self.assertEqual(process.restart_calls, 0)
+            self.assertEqual(bridge.calls, 1)
+
+    def test_restart_after_reconnect_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            state = StateStore(cfg)
+            bridge = FakeBridge([{"success": False, "error": "bridge timeout"}])
+            process = FakeProcessManager(restart_ok=True)
+            notifier = FakeNotifier()
+
+            manager = RecoveryManager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=notifier,  # type: ignore[arg-type]
+            )
+            result = manager.handle_cycle(
+                health={"status": "stuck", "reasons": ["main_thread_unresponsive"]},
+                runtime_snapshot={"positions": []},
+            )
+
+            self.assertEqual(result["action"], "restart_nt")
+            self.assertEqual(process.restart_calls, 1)
+
+    def test_no_connections_detected_notify_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            state = StateStore(cfg)
+            bridge = FakeBridge([{"success": True}])
+            process = FakeProcessManager(restart_ok=True)
+            notifier = FakeNotifier()
+
+            manager = RecoveryManager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=notifier,  # type: ignore[arg-type]
+            )
+            result = manager.handle_cycle(
+                health={"status": "degraded", "reasons": ["no_connections_detected"]},
+                runtime_snapshot={"positions": []},
+            )
+
+            self.assertEqual(result["action"], "notify_only")
+            self.assertEqual(bridge.calls, 0)
+
+    def test_snapshot_restore_manual_required(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            state = StateStore(cfg)
+            bridge = FakeBridge([{"success": True}])
+            process = FakeProcessManager(restart_ok=True)
+            notifier = FakeNotifier()
+
+            state.save_snapshot(
+                {
+                    "strategy_runtime": {
+                        "strategies": [
+                            {
+                                "account": "Sim101",
+                                "name": "TrendA",
+                                "instrument": "ES 06-26",
+                                "template": "",
+                                "is_enabled": True,
+                            }
+                        ]
+                    }
+                }
+            )
+            runtime = state.load_runtime_state()
+            runtime["awaiting_restore"] = True
+            state.save_runtime_state(runtime)
+
+            manager = RecoveryManager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=notifier,  # type: ignore[arg-type]
+            )
+            result = manager.handle_cycle(
+                health={"status": "ok", "reasons": []},
+                runtime_snapshot={"strategy_runtime": {"strategies": []}, "positions": []},
+            )
+
+            self.assertIn("restore", result)
+            self.assertFalse(result["restore"]["restored"])
+
+
+if __name__ == "__main__":
+    unittest.main()
+

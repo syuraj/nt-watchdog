@@ -1,0 +1,35 @@
+# Copy to watchdog/config.yaml and customize.
+bridge_url: "http://localhost:8899"
+health_endpoint: "/healthz"
+runtime_snapshot_endpoint: "/runtime_snapshot"
+reconnect_endpoint: "/recover/reconnect"
+flatten_then_reconnect_endpoint: "/recover/flatten_then_reconnect"
+
+poll_interval_sec: 60
+startup_grace_sec: 90
+mainthread_stuck_sec: 12
+unstable_cycles_before_recovery: 3
+reconnect_attempt_limit: 3
+notification_cooldown_sec: 900
+reconnect_cooldown_sec: 20
+restart_cooldown_sec: 120
+max_restarts_per_hour: 2
+
+# Recovery policy selected: flatten open positions, then recover.
+recovery_only_when_flat: false
+
+# Primary executable path from user-provided fixed path.
+nt_executable_path: "C:\\Program Files\\NinjaTrader 8\\bin64\\NinjaTrader.exe"
+nt_process_name: "NinjaTrader"
+nt_start_args: []
+process_detect_fallback: true
+
+snapshot_path: "watchdog/state/last_good_snapshot.json"
+events_log_path: "watchdog/logs/health_events.jsonl"
+
+# Prefer environment variables for secrets.
+telegram_enabled: true
+telegram_bot_token: ""
+telegram_chat_id: ""
+telegram_parse_mode: ""
+
