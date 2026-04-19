@@ -163,6 +163,27 @@ class NTProcessManager:
         self._spawn_login_helper()
         return True
 
+    def try_redirect_session_to_console(self, timeout_sec: int = 10) -> bool:
+        """Invoke scripts/rdp_disconnect_handler.ps1, which runs `tscon /dest:console`
+        on the first disconnected RDP session. Fixes the WPF-on-RDP rendering freeze
+        that causes NT8 charts to stall after the user disconnects an RDP session.
+
+        Returns True on successful invocation (including the no-op case). False on
+        script missing, timeout, or non-zero exit. Callers should treat False as
+        "try other recovery paths".
+        """
+        script = Path(__file__).resolve().parent.parent / "scripts" / "rdp_disconnect_handler.ps1"
+        if not script.exists():
+            return False
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                capture_output=True, text=True, timeout=timeout_sec,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
     def restart(self, startup_grace_sec: int) -> bool:
         if not self.stop():
             return False

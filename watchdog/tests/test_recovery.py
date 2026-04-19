@@ -29,13 +29,19 @@ class FakeBridge:
 
 
 class FakeProcessManager:
-    def __init__(self, restart_ok: bool = True) -> None:
+    def __init__(self, restart_ok: bool = True, redirect_ok: bool = False) -> None:
         self.restart_ok = restart_ok
         self.restart_calls = 0
+        self.redirect_ok = redirect_ok
+        self.redirect_calls = 0
 
     def restart(self, startup_grace_sec: int) -> bool:
         self.restart_calls += 1
         return self.restart_ok
+
+    def try_redirect_session_to_console(self, timeout_sec: int = 10) -> bool:
+        self.redirect_calls += 1
+        return self.redirect_ok
 
 
 class FakeNotifier:
@@ -84,6 +90,35 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(result["action"], "reconnect")
             self.assertEqual(process.restart_calls, 0)
             self.assertEqual(bridge.calls, 1)
+
+    def test_stuck_triggers_rdp_redirect_before_reconnect(self) -> None:
+        """When /healthz reports main_thread_unresponsive, watchdog should try
+        to redirect the disconnected RDP session to console BEFORE calling
+        /recover/reconnect. Prevents unnecessary broker-reconnect churn when
+        the actual cause is a hung WPF renderer."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            state = StateStore(cfg)
+            bridge = FakeBridge([])
+            process = FakeProcessManager(restart_ok=True, redirect_ok=True)
+            notifier = FakeNotifier()
+
+            manager = RecoveryManager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=notifier,  # type: ignore[arg-type]
+            )
+            result = manager.handle_cycle(
+                health={"status": "stuck", "reasons": ["main_thread_unresponsive"]},
+                runtime_snapshot={"positions": []},
+            )
+
+            self.assertEqual(process.redirect_calls, 1)
+            self.assertEqual(bridge.calls, 0, "reconnect should be skipped when redirect succeeds")
+            self.assertEqual(process.restart_calls, 0)
+            self.assertEqual(result["action"], "rdp_redirect")
 
     def test_reconnect_passes_configured_connection_names(self) -> None:
         with tempfile.TemporaryDirectory() as td:

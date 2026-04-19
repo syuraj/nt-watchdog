@@ -294,6 +294,25 @@ class RecoveryManager:
 
         incident_id = self._get_incident_id()
 
+        # RDP-disconnect-induced UI freeze: a disconnected RDP session detaches the
+        # virtual display driver, which suspends WPF Direct3D rendering. Main thread
+        # hangs while market data still flows. Before the normal reconnect/restart
+        # escalation, try redirecting any disconnected RDP session to the console —
+        # that re-binds the GPU and rendering resumes without touching NT.
+        ui_stuck = status == "stuck" and isinstance(reasons, list) and "main_thread_unresponsive" in reasons
+        if ui_stuck and hasattr(self.process_manager, "try_redirect_session_to_console"):
+            redirected = self.process_manager.try_redirect_session_to_console()
+            self.state_store.append_event({"kind": "rdp_redirect", "success": redirected, "incident_id": incident_id})
+            if redirected:
+                return self._degraded_notify(
+                    event_type="rdp_redirect_attempted",
+                    status=status,
+                    reason="ui_thread_unresponsive_redirected",
+                    incident_id=incident_id,
+                    action="rdp_redirect",
+                )
+            # Fall through to the normal reconnect/restart flow if redirect failed.
+
         no_connections = isinstance(reasons, list) and "no_connections_detected" in reasons
         if no_connections and not self._should_attempt_no_connections_recovery():
             return self._degraded_notify(
