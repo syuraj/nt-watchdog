@@ -17,7 +17,9 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
-$logPath = Join-Path $env:ProgramData "nt8-health\rdp_handler.log"
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = Split-Path -Parent $scriptDir
+$logPath = Join-Path $repoRoot "watchdog\logs\rdp_handler.log"
 $logDir = Split-Path $logPath -Parent
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
@@ -29,39 +31,62 @@ function Write-Log {
 
 Write-Log "handler invoked TargetUser='$TargetUser'"
 
-$raw = (qwinsta 2>&1)
-if ($LASTEXITCODE -ne 0) {
-    Write-Log "qwinsta failed exit=$LASTEXITCODE out='$raw'"
-    exit 1
-}
+# Event 24 fires the moment Windows flags the session as disconnecting, but
+# qwinsta may still show it as Active for a second or two before settling to
+# Disc. Poll up to ~15s so the handler doesn't miss the window.
+$maxAttempts = 15
+$attempt = 0
+while ($attempt -lt $maxAttempts) {
+    $attempt++
+    $raw = (qwinsta 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        Write-Log "qwinsta failed exit=$LASTEXITCODE out='$raw'"
+        Start-Sleep -Seconds 1
+        continue
+    }
+    # Diagnostic: log full table on first attempt so we can see actual states.
+    if ($attempt -eq 1) {
+        foreach ($dl in ($raw -split "`r?`n")) {
+            if (-not [string]::IsNullOrWhiteSpace($dl)) { Write-Log "qwinsta: $dl" }
+        }
+    }
 
-# qwinsta columns: SESSIONNAME USERNAME ID STATE TYPE DEVICE
-# Lines may start with ">" for the current session. Skip header.
-$lines = ($raw -split "`r?`n") | Select-Object -Skip 1
-foreach ($line in $lines) {
-    if ([string]::IsNullOrWhiteSpace($line)) { continue }
-    # Flexible match: optional leading '>', session name, optional user, ID, STATE
-    if ($line -match '^\s*>?\s*(\S+)\s+(\S+)?\s+(\d+)\s+(\S+)') {
-        $sessionName = $Matches[1]
-        $user = $Matches[2]
-        $id = $Matches[3]
-        $state = $Matches[4]
-        # When the username is absent, the regex captures the ID into group 2 instead.
-        if ($user -match '^\d+$') {
-            $user = ""
-            $id = $Matches[2]
-            $state = $Matches[3]
+    # qwinsta columns: SESSIONNAME USERNAME ID STATE TYPE DEVICE
+    # Lines may start with ">" for the current session. Skip header.
+    $lines = ($raw -split "`r?`n") | Select-Object -Skip 1
+    foreach ($line in $lines) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        # qwinsta output is fixed-width but SESSIONNAME / USERNAME can be blank.
+        # Tokenize and locate the first numeric (ID); STATE is the token after it.
+        # USERNAME is the token immediately before ID when present.
+        $stripped = $line -replace '^\s*>', ' '
+        $tokens = ($stripped -split '\s+') | Where-Object { $_ -ne "" }
+        if ($tokens.Count -lt 3) { continue }
+        $idIdx = -1
+        for ($i = 0; $i -lt $tokens.Count; $i++) {
+            if ($tokens[$i] -match '^\d+$') { $idIdx = $i; break }
+        }
+        if ($idIdx -lt 0 -or $idIdx + 1 -ge $tokens.Count) { continue }
+        $id = $tokens[$idIdx]
+        $state = $tokens[$idIdx + 1]
+        # USERNAME is the token before ID IF it's not a known session name.
+        $user = ""
+        if ($idIdx -ge 1) {
+            $prev = $tokens[$idIdx - 1]
+            if ($prev -notin @("services", "console", "rdp-tcp")) { $user = $prev }
         }
         if ($state -ne "Disc") { continue }
         if ($TargetUser -and $user -ne $TargetUser) { continue }
 
-        Write-Log "redirecting session id=$id user='$user' name='$sessionName' to console"
+        Write-Log "redirecting session id=$id user='$user' attempt=$attempt"
         & tscon $id /dest:console 2>&1 | ForEach-Object { Write-Log "tscon: $_" }
         $rc = $LASTEXITCODE
         Write-Log "tscon exit=$rc"
         exit $rc
     }
+
+    Start-Sleep -Seconds 1
 }
 
-Write-Log "no disconnected session found"
+Write-Log "no disconnected session found after $maxAttempts attempts"
 exit 0

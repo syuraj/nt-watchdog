@@ -1,12 +1,10 @@
-# NT8 Health Watchdog
+# NT Watchdog
 
-This project adds a self-healing health monitor for NinjaTrader 8 on a Windows VPS.
+Self-healing health monitor for NinjaTrader 8 on a Windows VPS.
 
-It has two parts:
-- `HealthBridge.cs`: an NT8 AddOn that exposes local HTTP health/recovery endpoints.
-- `watchdog/`: a Python watchdog that monitors those endpoints, attempts recovery, and sends Telegram alerts.
-
-Default bridge port is `8899` (to avoid conflicts with other tools on `8888`).
+Two parts:
+- `HealthBridge.cs`: NT8 AddOn exposing local HTTP health/recovery endpoints on port `8899`.
+- `watchdog/`: Python watchdog that polls the bridge, runs staged recovery, and sends Telegram alerts.
 
 ## What It Does
 - Detects NT health issues (`/healthz`) such as stale UI/main-thread, connection instability, and blocking windows.
@@ -46,11 +44,23 @@ Optional env overrides:
 - Mock smoke test:
   - `python scripts/manage_watchdog.py smoke-test --cleanup`
 
-## Startup On Login
+## Startup On Login (Optional)
 - `python scripts/manage_watchdog.py install-startup`
 - remove with `python scripts/manage_watchdog.py remove-startup`
 - trigger startup now (without relogin):
   - `python scripts/manage_watchdog.py trigger-startup`
+
+## RDP Disconnect Handler (prevent chart freeze)
+
+NT8 chart rendering freezes when an RDP session disconnects (WPF/Direct3D detaches from GPU). A scheduled task triggered on Event ID 24 redirects the disconnected session to console via `tscon`, keeping rendering alive.
+
+Install (run from elevated shell):
+- `python scripts/manage_watchdog.py install-rdp-handler`
+
+Remove:
+- `python scripts/manage_watchdog.py remove-rdp-handler`
+
+Log: `watchdog/logs/rdp_handler.log`.
 
 For watchdog internals and test commands, see `watchdog/README.md`.
 

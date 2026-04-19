@@ -55,4 +55,4 @@ Register-ScheduledTask -TaskName $TaskName `
 
 Write-Host "installed task '$TaskName' for user '$TargetUser'"
 Write-Host "handler: $handlerPath"
-Write-Host "log: $env:ProgramData\nt8-health\rdp_handler.log"
+Write-Host "log: $scriptDir\..\watchdog\logs\rdp_handler.log"
