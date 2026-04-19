@@ -14,18 +14,24 @@ Two parts:
 - For `no_connections_detected`, attempts reconnect-only recovery with a dedicated cooldown (`no_connections_recovery_cooldown_sec`) and does not escalate to NT process restart from that reason alone.
 - Supports configured reconnect targets via `connection_names` in `watchdog/config.yaml` (for example `My NinjaTrader`).
 - Saves last-known-good runtime snapshot for restore workflows.
-- Logs watchdog events to `watchdog/logs/health_events.jsonl`.
+- Open-position policy: flatten then recover.
+- Deduplicates repeat incident alerts during cooldown (`notification_cooldown_sec`).
 
 ## Quick Setup (Python-first)
 1. Copy bridge source to NT8 AddOns folder:
    - `C:\Users\<you>\Documents\NinjaTrader 8\bin\Custom\AddOns\HealthBridge.cs`
 2. In NinjaTrader, compile NinjaScript so `HealthBridge` loads.
-3. From this repo root, run:
-   - `python scripts/manage_watchdog.py setup --bridge-url http://localhost:8899 --nt-executable-path "C:\Path\To\NinjaTrader.exe"`
-4. (Optional) Configure Telegram env vars:
-   - `setx TELEGRAM_BOT_TOKEN "<token>"`
-   - `setx TELEGRAM_CHAT_ID "<chat_id>"`
-5. Start watchdog:
+3. From repo root, run setup:
+   - `python scripts/manage_watchdog.py setup --bridge-url http://localhost:8899`
+   - Default NT exe path is `C:\Program Files\NinjaTrader 8\bin\NinjaTrader.exe`. If different, pass `--nt-executable-path "C:\Your\Path\NinjaTrader.exe"
+4. Install RDP disconnect handler (elevated shell) — prevents chart freeze on disconnect:
+   - `python scripts/manage_watchdog.py install-rdp-handler`
+5. (Optional) Configure Telegram alerts — edit `watchdog/config.yaml`:
+   ```yaml
+   telegram_bot_token: "<token>"
+   telegram_chat_id: "<chat_id>"
+   ```
+6. Start watchdog:
    - `python scripts/manage_watchdog.py run`
 
 Optional env overrides:
@@ -62,5 +68,12 @@ Remove:
 
 Log: `watchdog/logs/rdp_handler.log`.
 
-For watchdog internals and test commands, see `watchdog/README.md`.
+## Logs and State
+- Runtime events: `watchdog/logs/health_events.jsonl`
+- Last good snapshot: `watchdog/state/last_good_snapshot.json`
+- Runtime counters: `watchdog/state/runtime_state.json`
+
+## Notes
+- NT8 strategy re-enable APIs are limited. Watchdog uses UI automation to toggle strategy checkboxes on the Strategies tab after reconnect; falls back to manual restore request if UIA fails.
+- See `AGENTS.md` for architecture, editing rules, and verification checklist.
 
