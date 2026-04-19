@@ -43,7 +43,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
         // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
         // Format: UTC timestamp at edit time.
-        private const string BuildId = "2026-04-18T21:45:00Z";
+        private const string BuildId = "2026-04-18T23:10:00Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -750,7 +750,6 @@ namespace NinjaTrader.NinjaScript.AddOns
             string opError = "";
             int postTotalConnections = -1;
             int postConnectedConnections = -1;
-            var debugTrail = new List<string>();
 
             string dispatcherErr;
             bool ok = InvokeOnMainThreadWithTimeout(() =>
@@ -834,10 +833,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                         totalConnectionsSeen++;
                         reconnectAttempts++;
                         string err;
-                        string pathTag;
-                        bool invoked = TryConnectConfiguredName(configuredName, out err, out pathTag);
-                        if (invoked)
-                            debugTrail.Add(configuredName + "=>" + pathTag);
+                        bool invoked = TryConnectConfiguredName(configuredName, out err);
                         if (!invoked && !triedNoArgConnect && targetConnectionNames.Count == 0)
                         {
                             string fallbackErr;
@@ -847,7 +843,6 @@ namespace NinjaTrader.NinjaScript.AddOns
                             {
                                 invoked = true;
                                 err = "";
-                                debugTrail.Add(configuredName + "=>noarg_static");
                             }
                             else if (!string.IsNullOrEmpty(fallbackErr))
                             {
@@ -869,37 +864,8 @@ namespace NinjaTrader.NinjaScript.AddOns
             if (totalConnectionsSeen == 0)
                 opError = string.IsNullOrEmpty(opError) ? "no connections available for reconnect" : opError + " | no connections available for reconnect";
 
-            string verifyErr = "";
-            bool verifyOk = false;
-            for (int i = 0; i < 4; i++)
-            {
-                Thread.Sleep(750);
-                int localTotal = 0;
-                int localConnected = 0;
-                string stepErr;
-                bool stepOk = InvokeOnMainThreadWithTimeout(() =>
-                {
-                    foreach (var conn in Connection.Connections)
-                    {
-                        localTotal++;
-                        var status = conn.Status.ToString();
-                        if (status.Equals("Connected", StringComparison.OrdinalIgnoreCase))
-                            localConnected++;
-                    }
-                }, 2000, out stepErr);
-                if (stepOk)
-                {
-                    verifyOk = true;
-                    postTotalConnections = localTotal;
-                    postConnectedConnections = localConnected;
-                    if (postConnectedConnections > 0)
-                        break;
-                }
-                else
-                {
-                    verifyErr = stepErr;
-                }
-            }
+            string verifyErr;
+            bool verifyOk = VerifyConnectionsConnected(out postTotalConnections, out postConnectedConnections, out verifyErr);
             if (!verifyOk && !string.IsNullOrEmpty(verifyErr))
                 opError = string.IsNullOrEmpty(opError) ? verifyErr : opError + " | " + verifyErr;
             if (verifyOk && postConnectedConnections <= 0)
@@ -940,16 +906,49 @@ namespace NinjaTrader.NinjaScript.AddOns
             sb.Append("\"post_check\":{\"total\":").Append(postTotalConnections).Append(",\"connected\":").Append(postConnectedConnections).Append("},");
             sb.Append("\"flatten\":{\"attempted\":").Append(flattenAttempts).Append(",\"succeeded\":").Append(flattenSucceeded).Append(",\"failed\":").Append(flattenFailed).Append("},");
             sb.Append("\"reconnect\":{\"attempted\":").Append(reconnectAttempts).Append(",\"succeeded\":").Append(reconnectSucceeded).Append(",\"failed\":").Append(reconnectFailed).Append("},");
-            sb.Append("\"debug_trail\":[");
-            for (int i = 0; i < debugTrail.Count; i++)
-            {
-                if (i > 0) sb.Append(",");
-                sb.Append("\"").Append(JsonEscape(debugTrail[i])).Append("\"");
-            }
-            sb.Append("],");
             sb.Append("\"error\":\"").Append(JsonEscape(opError)).Append("\"");
             sb.Append("}");
             return sb.ToString();
+        }
+
+        // Poll Connection.Connections up to 4 times (750ms apart) looking for any connection
+        // that reports Connected. Reports the final totals on the last successful dispatch.
+        private bool VerifyConnectionsConnected(out int postTotal, out int postConnected, out string lastError)
+        {
+            postTotal = -1;
+            postConnected = -1;
+            lastError = "";
+            bool verifyOk = false;
+            for (int i = 0; i < 4; i++)
+            {
+                Thread.Sleep(750);
+                int localTotal = 0;
+                int localConnected = 0;
+                string stepErr;
+                bool stepOk = InvokeOnMainThreadWithTimeout(() =>
+                {
+                    foreach (var conn in Connection.Connections)
+                    {
+                        localTotal++;
+                        var status = conn.Status.ToString();
+                        if (status.Equals("Connected", StringComparison.OrdinalIgnoreCase))
+                            localConnected++;
+                    }
+                }, 2000, out stepErr);
+                if (stepOk)
+                {
+                    verifyOk = true;
+                    postTotal = localTotal;
+                    postConnected = localConnected;
+                    if (postConnected > 0)
+                        break;
+                }
+                else
+                {
+                    lastError = stepErr;
+                }
+            }
+            return verifyOk;
         }
 
 
@@ -1316,14 +1315,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         private bool TryConnectConfiguredName(string connectionName, out string error)
         {
-            string path;
-            return TryConnectConfiguredName(connectionName, out error, out path);
-        }
-
-        private bool TryConnectConfiguredName(string connectionName, out string error, out string path)
-        {
             error = "";
-            path = "";
             if (string.IsNullOrEmpty(connectionName))
             {
                 error = "connection name is empty";
@@ -1336,8 +1328,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                 string ccErr;
                 if (TryConnectViaControlCenter(connectionName, out ccErr))
                 {
-                    path = string.IsNullOrEmpty(_lastControlCenterPath) ? "control_center" : _lastControlCenterPath;
-                    Log("reconnect path: " + path + " succeeded for " + connectionName);
+                    string tag = string.IsNullOrEmpty(_lastControlCenterPath) ? "control_center" : _lastControlCenterPath;
+                    Log("reconnect path: " + tag + " succeeded for " + connectionName);
                     return true;
                 }
                 if (!string.IsNullOrEmpty(ccErr))
@@ -1351,11 +1343,10 @@ namespace NinjaTrader.NinjaScript.AddOns
                         continue;
                     string err;
                     if (TryInvokeConnectMethod(method, null, connectionName, null, out err))
-                        {
-                            path = "static:" + method.DeclaringType.Name + "." + method.Name + "(" + method.GetParameters().Length + ")";
-                            Log("reconnect path: static_reflection " + method.DeclaringType.FullName + "." + method.Name + " succeeded for " + connectionName);
-                            return true;
-                        }
+                    {
+                        Log("reconnect path: static_reflection " + method.DeclaringType.FullName + "." + method.Name + " succeeded for " + connectionName);
+                        return true;
+                    }
                 }
             }
             catch (Exception ex)

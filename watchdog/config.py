@@ -21,13 +21,11 @@ class WatchdogConfig:
     reconnect_attempt_limit: int = 10
     notification_cooldown_sec: int = 900
     no_connections_recovery_cooldown_sec: int = 300
-    reconnect_cooldown_sec: int = 20
     restart_cooldown_sec: int = 120
     max_restarts_per_hour: int = 2
     recovery_only_when_flat: bool = False
     nt_executable_path: str = r"C:\Program Files\NinjaTrader 8\bin\NinjaTrader.exe"
     nt_process_name: str = "NinjaTrader"
-    nt_start_args: List[str] = field(default_factory=list)
     nt_username: str = ""
     nt_password: str = ""
     process_detect_fallback: bool = True

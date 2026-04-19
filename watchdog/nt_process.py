@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -157,9 +156,8 @@ class NTProcessManager:
         except Exception:
             return False
 
-        args = [exe] + list(self.config.nt_start_args or [])
         try:
-            subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen([exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             return False
         self._spawn_login_helper()

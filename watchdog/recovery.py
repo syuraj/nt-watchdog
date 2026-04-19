@@ -165,6 +165,73 @@ class RecoveryManager:
         self._notify("restore_manual_required", {"status": "degraded", "action": "manual_restore", "reason": message})
         return {"restored": False, "reason": message}
 
+    def _attempt_reconnect(self, runtime_snapshot: Dict[str, Any], extra_event: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Run a single reconnect attempt and log the outcome as a reconnect_attempt event.
+
+        Returns a dict with keys: success, open_positions, bridge_unreachable, details.
+        `extra_event` is merged into the logged event (e.g. to record a reason tag).
+        """
+        open_positions = self._has_open_positions(runtime_snapshot)
+        reconnect_result = self.bridge.recover_reconnect(
+            flatten_first=open_positions,
+            connection_names=self.config.connection_names,
+        )
+        success = bool(reconnect_result.get("success"))
+        err_text = str(reconnect_result.get("error", "") or "").lower()
+        # Bridge transport failure (NT dead, bridge not listening) is not a reconnect-logic
+        # failure — callers should skip escalation and wait for the bootstrap path.
+        bridge_unreachable = (not success) and any(
+            marker in err_text
+            for marker in ("urlopen error", "winerror 10061", "connection refused", "actively refused")
+        )
+        event = {
+            "kind": "reconnect_attempt",
+            "success": success,
+            "open_positions": open_positions,
+            "bridge_unreachable": bridge_unreachable,
+            "details": reconnect_result,
+        }
+        if extra_event:
+            event.update(extra_event)
+        self.state_store.append_event(event)
+        return {
+            "success": success,
+            "open_positions": open_positions,
+            "bridge_unreachable": bridge_unreachable,
+            "details": reconnect_result,
+        }
+
+    def _degraded_notify(
+        self,
+        *,
+        event_type: str,
+        status: str,
+        reason: str,
+        incident_id: str,
+        action: str = "notify_only",
+        state: str = "degraded",
+        log_event: bool = False,
+    ) -> Dict[str, Any]:
+        """Build a degraded/notify-only result dict and fire a notification.
+
+        Consolidates the three near-identical result-building blocks used by the
+        no_connections branches and the restart-circuit-breaker branch.
+        """
+        result = {
+            "state": state,
+            "action": action,
+            "reason": reason,
+            "incident_id": incident_id,
+        }
+        if log_event:
+            self.state_store.append_event(result)
+        notify_meta = self._notify(
+            event_type,
+            {"status": status, "action": action, "reason": reason},
+        )
+        result.update(notify_meta)
+        return result
+
     def _should_attempt_no_connections_recovery(self) -> bool:
         cooldown = int(getattr(self.config, "no_connections_recovery_cooldown_sec", 0) or 0)
         if cooldown <= 0:
@@ -204,10 +271,18 @@ class RecoveryManager:
                 self._store_last_good_snapshot(runtime_snapshot, health)
             self._persist_runtime()
             if prior_incident:
-                resolved_alert_meta = self._notify(
-                    "incident_resolved",
-                    {"status": "ok", "action": "none", "reason": "health_restored"},
-                    incident_id=prior_incident,
+                # Log the resolution as an event but skip the Telegram send — a
+                # prior reconnect_success / restart_success already notified that
+                # recovery worked; a second "resolved" message is noise.
+                self.state_store.append_event(
+                    {
+                        "kind": "notification",
+                        "event_type": "incident_resolved",
+                        "incident_id": prior_incident,
+                        "sent": None,
+                        "skipped": True,
+                        "reason": "suppressed_after_success",
+                    }
                 )
                 self._clear_incident()
             result = {"state": "healthy", "action": "none", "reason": "ok"}
@@ -221,41 +296,21 @@ class RecoveryManager:
 
         no_connections = isinstance(reasons, list) and "no_connections_detected" in reasons
         if no_connections and not self._should_attempt_no_connections_recovery():
-            result = {
-                "state": "degraded",
-                "action": "notify_only",
-                "reason": "no_connections_detected_cooldown",
-                "incident_id": incident_id,
-            }
-            self.state_store.append_event(result)
-            notify_meta = self._notify(
-                "no_connections_detected",
-                {"status": status, "action": "notify_only", "reason": "no_connections_detected_cooldown"},
+            return self._degraded_notify(
+                event_type="no_connections_detected",
+                status=status,
+                reason="no_connections_detected_cooldown",
+                incident_id=incident_id,
+                log_event=True,
             )
-            result.update(notify_meta)
-            return result
 
         # Safety policy: if there are no NT connections, attempt reconnect only.
         # Do not escalate to process restart from this reason alone.
         if no_connections:
-            open_positions = self._has_open_positions(runtime_snapshot)
-            reconnect_result = self.bridge.recover_reconnect(
-                flatten_first=open_positions,
-                connection_names=self.config.connection_names,
-            )
-            reconnect_ok = bool(reconnect_result.get("success"))
-            self.state_store.append_event(
-                {
-                    "kind": "reconnect_attempt",
-                    "success": reconnect_ok,
-                    "open_positions": open_positions,
-                    "reason": "no_connections_detected",
-                    "details": reconnect_result,
-                }
-            )
-            if reconnect_ok:
-                self.runtime_state["reconnect_failures"] = 0
-                self._persist_runtime()
+            attempt = self._attempt_reconnect(runtime_snapshot, extra_event={"reason": "no_connections_detected"})
+            self.runtime_state["reconnect_failures"] = 0
+            self._persist_runtime()
+            if attempt["success"]:
                 notify_meta = self._notify(
                     "reconnect_success",
                     {"status": status, "action": "reconnect", "reason": "no_connections_reconnect_success"},
@@ -270,48 +325,17 @@ class RecoveryManager:
                 return result
 
             # Keep restart path disabled for no-connections incidents.
-            self.runtime_state["reconnect_failures"] = 0
-            self._persist_runtime()
-            result = {
-                "state": "degraded",
-                "action": "notify_only",
-                "reason": "no_connections_reconnect_failed",
-                "incident_id": incident_id,
-            }
-            self.state_store.append_event(result)
-            notify_meta = self._notify(
-                "no_connections_detected",
-                {"status": status, "action": "notify_only", "reason": "no_connections_reconnect_failed"},
+            return self._degraded_notify(
+                event_type="no_connections_detected",
+                status=status,
+                reason="no_connections_reconnect_failed",
+                incident_id=incident_id,
+                log_event=True,
             )
-            result.update(notify_meta)
-            return result
 
-        open_positions = self._has_open_positions(runtime_snapshot)
-        reconnect_result = self.bridge.recover_reconnect(
-            flatten_first=open_positions,
-            connection_names=self.config.connection_names,
-        )
-        reconnect_ok = bool(reconnect_result.get("success"))
-        # Bridge transport failure (NT process dead, bridge not yet listening) is not a
-        # reconnect-logic failure — shouldn't count against reconnect_attempt_limit or
-        # escalate to restart. The monitor-loop bootstrap path handles dead-process case.
-        err_text = str(reconnect_result.get("error", "") or "").lower()
-        bridge_unreachable = (not reconnect_ok) and (
-            "urlopen error" in err_text
-            or "winerror 10061" in err_text
-            or "connection refused" in err_text
-            or "actively refused" in err_text
-        )
-        self.state_store.append_event(
-            {
-                "kind": "reconnect_attempt",
-                "success": reconnect_ok,
-                "open_positions": open_positions,
-                "bridge_unreachable": bridge_unreachable,
-                "details": reconnect_result,
-            }
-        )
-        if bridge_unreachable:
+        attempt = self._attempt_reconnect(runtime_snapshot)
+        reconnect_ok = attempt["success"]
+        if attempt["bridge_unreachable"]:
             # Skip counter increment + escalation; wait for bootstrap path to revive NT.
             result = {
                 "state": "degraded",
@@ -385,22 +409,12 @@ class RecoveryManager:
             return result
 
         if not self._can_restart_now():
-            notify_meta = self._notify(
-                "restart_blocked",
-                {
-                    "status": status,
-                    "action": "notify_only",
-                    "reason": "restart_circuit_breaker_open",
-                },
+            return self._degraded_notify(
+                event_type="restart_blocked",
+                status=status,
+                reason="restart_circuit_breaker_open",
+                incident_id=incident_id,
             )
-            result = {
-                "state": "degraded",
-                "action": "notify_only",
-                "reason": "restart_circuit_breaker_open",
-                "incident_id": incident_id,
-            }
-            result.update(notify_meta)
-            return result
 
         restart_reason = f"reconnect_attempt_{failures}_failed_restart"
         restarted = self.process_manager.restart(startup_grace_sec=self.config.startup_grace_sec)

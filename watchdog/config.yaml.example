@@ -15,7 +15,6 @@ unstable_cycles_before_recovery: 3
 reconnect_attempt_limit: 10
 notification_cooldown_sec: 900
 no_connections_recovery_cooldown_sec: 300
-reconnect_cooldown_sec: 20
 restart_cooldown_sec: 120
 max_restarts_per_hour: 2
 
@@ -25,7 +24,6 @@ recovery_only_when_flat: false
 # Primary executable path from user-provided fixed path.
 nt_executable_path: "C:\\Program Files\\NinjaTrader 8\\bin\\NinjaTrader.exe"
 nt_process_name: "NinjaTrader"
-nt_start_args: []
 # NT login credentials. After restart, a detached PowerShell helper waits for
 # the login dialog and types username/password via SendKeys. NT8 has no CLI
 # auth flag, so this is the only way to auto-login after an unattended restart.
