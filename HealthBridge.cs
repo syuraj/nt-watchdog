@@ -43,7 +43,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
         // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
         // Format: UTC timestamp at edit time.
-        private const string BuildId = "2026-04-18T23:10:00Z";
+        private const string BuildId = "2026-04-19T05:15:00Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -241,6 +241,9 @@ namespace NinjaTrader.NinjaScript.AddOns
                             break;
                         case "/connections":
                             body = GetConnectionsJson();
+                            break;
+                        case "/instruments_debug":
+                            body = GetInstrumentsDebugJson();
                             break;
                         case "/orders":
                             body = GetOrdersJson();
@@ -2096,6 +2099,301 @@ Write-Host (""toggled="" + $toggled + "" count="" + $cbs.Count)
             sb0.Append("\"checkbox_count\":").Append(count).Append(",");
             sb0.Append("\"error\":\"").Append(JsonEscape(errMsg)).Append("\"");
             sb0.Append("}");
+            return sb0.ToString();
+        }
+
+        // One-shot diagnostic: probes common NT API surfaces for a subscription /
+        // last-tick accessor. Dumps type shapes + any instrument-like entries so
+        // we can identify the field to read for tick freshness detection.
+        private string GetInstrumentsDebugJson()
+        {
+            var probes = new List<string>();
+            var entries = new List<string>();
+            string err;
+            bool ok = InvokeOnMainThreadWithTimeout(() =>
+            {
+                // Look for static "All" style collections on Instrument and MasterInstrument.
+                foreach (var typeName in new[] {
+                    "NinjaTrader.Cbi.Instrument",
+                    "NinjaTrader.Cbi.MasterInstrument",
+                    "NinjaTrader.Data.MarketData",
+                    "NinjaTrader.Cbi.Subscription",
+                })
+                {
+                    var t = Type.GetType(typeName) ?? Type.GetType(typeName + ", NinjaTrader.Core");
+                    if (t == null) { probes.Add(typeName + ":MISSING"); continue; }
+                    probes.Add(typeName + ":FOUND");
+                    foreach (var p in t.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static))
+                    {
+                        var pn = p.Name.ToLowerInvariant();
+                        if (pn == "all" || pn.Contains("subscrib") || pn.Contains("instance") || pn.Contains("active"))
+                            probes.Add(typeName + ".SP:" + p.Name + ":" + p.PropertyType.Name);
+                    }
+                    foreach (var f in t.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static))
+                    {
+                        var fn = f.Name.ToLowerInvariant();
+                        if (fn == "all" || fn.Contains("subscrib") || fn.Contains("instance") || fn.Contains("active"))
+                            probes.Add(typeName + ".SF:" + f.Name + ":" + f.FieldType.Name);
+                    }
+                }
+
+                // Probe Instrument static methods — GetInstrument(string) is the public lookup.
+                try
+                {
+                    var instT2 = Type.GetType("NinjaTrader.Cbi.Instrument, NinjaTrader.Core");
+                    if (instT2 != null)
+                    {
+                        foreach (var m in instT2.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static))
+                        {
+                            var mn = m.Name;
+                            if (mn.StartsWith("Get") || mn.Contains("Find") || mn.Contains("Lookup"))
+                                probes.Add("InstS.M:" + mn + "(" + string.Join(",", Array.ConvertAll(m.GetParameters(), pp => pp.ParameterType.Name)) + ")");
+                        }
+                    }
+                }
+                catch { }
+
+                // Quick lookup: try to fetch "BTCUSD" specifically to see if it returns MarketData.
+                try
+                {
+                    var instT2 = Type.GetType("NinjaTrader.Cbi.Instrument, NinjaTrader.Core");
+                    if (instT2 != null)
+                    {
+                        var getMethod = instT2.GetMethod("GetInstrument", new Type[] { typeof(string), typeof(bool) });
+                        if (getMethod != null)
+                        {
+                            foreach (var sym in new[] { "BTCUSD", "NQ 06-26" })
+                            {
+                                var result = getMethod.Invoke(null, new object[] { sym, false });
+                                if (result == null)
+                                {
+                                    probes.Add("GetInstrument('" + sym + "')=null");
+                                    continue;
+                                }
+                                probes.Add("GetInstrument('" + sym + "')=" + result.GetType().Name);
+                                object md;
+                                if (TryGetPropertyValue(result, "MarketData", out md) && md != null)
+                                {
+                                    object last;
+                                    if (TryGetPropertyValue(md, "Last", out last) && last != null)
+                                    {
+                                        double lp = 0.0;
+                                        DateTime lt = default(DateTime);
+                                        try
+                                        {
+                                            var pp = last.GetType().GetProperty("Price");
+                                            if (pp != null) { var pv = pp.GetValue(last, null); if (pv != null) lp = Convert.ToDouble(pv); }
+                                            var tp = last.GetType().GetProperty("Time");
+                                            if (tp != null) { var tv = tp.GetValue(last, null); if (tv is DateTime) lt = (DateTime)tv; }
+                                        }
+                                        catch { }
+                                        probes.Add(sym + " last=" + lp.ToString("F4") + " time=" + (lt == default(DateTime) ? "default" : lt.ToString("o")));
+                                    }
+                                    else probes.Add(sym + " Last=null");
+                                }
+                                else probes.Add(sym + " MarketData=null");
+                            }
+                        }
+                        else probes.Add("GetInstrument(string) not found");
+                    }
+                }
+                catch (Exception ex) { probes.Add("getInstrument_err:" + ex.Message); }
+
+                // Probe Instrument instance fields/props — the subscription marker is on each Instrument.
+                try
+                {
+                    var instT = Type.GetType("NinjaTrader.Cbi.Instrument, NinjaTrader.Core")
+                        ?? Type.GetType("NinjaTrader.Cbi.Instrument");
+                    if (instT != null)
+                    {
+                        foreach (var p in instT.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly))
+                            probes.Add("Inst.P:" + p.Name + ":" + p.PropertyType.Name);
+                        foreach (var f in instT.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly))
+                            probes.Add("Inst.F:" + f.Name + ":" + f.FieldType.Name);
+                    }
+                }
+                catch { }
+
+                // Walk subscribedThreads — each worker owns a subscribed Instrument with live data.
+                try
+                {
+                    var instT = Type.GetType("NinjaTrader.Cbi.Instrument, NinjaTrader.Core")
+                        ?? Type.GetType("NinjaTrader.Cbi.Instrument");
+                    if (instT != null)
+                    {
+                        var stF = instT.GetField("subscribedThreads",
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                        if (stF != null)
+                        {
+                            var stVal = stF.GetValue(null);
+                            probes.Add("subscribedThreads=" + (stVal == null ? "null" : stVal.GetType().FullName));
+                            var en2 = stVal as System.Collections.IEnumerable;
+                            if (en2 != null)
+                            {
+                                int i = 0;
+                                var nowUtc = DateTime.UtcNow;
+                                foreach (var item in en2)
+                                {
+                                    i++;
+                                    if (item == null) continue;
+                                    var ittype = item.GetType();
+                                    // Dump all members on first item
+                                    if (i == 1)
+                                    {
+                                        foreach (var pp in ittype.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                                            probes.Add("st.P:" + pp.Name + ":" + pp.PropertyType.Name);
+                                        foreach (var ff in ittype.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                                            probes.Add("st.F:" + ff.Name + ":" + ff.FieldType.Name);
+                                    }
+                                    object instRef = null;
+                                    foreach (var ff in ittype.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
+                                    {
+                                        if (ff.FieldType == typeof(WeakReference))
+                                        {
+                                            var wr = ff.GetValue(item) as WeakReference;
+                                            if (wr != null && wr.IsAlive)
+                                            {
+                                                var tgt = wr.Target;
+                                                if (i <= 2 && tgt != null)
+                                                    probes.Add("st[" + i + "].wr_target=" + tgt.GetType().FullName);
+                                                instRef = tgt;
+                                            }
+                                            if (instRef != null) break;
+                                        }
+                                    }
+                                    if (instRef == null) { probes.Add("st[" + i + "]:no_instrument_ref"); continue; }
+                                    string nm = GetAnyStringProperty(instRef, new[] { "FullName", "Name" });
+                                    // Read Last via MarketData.Last (struct)
+                                    double lastPrice = 0.0;
+                                    DateTime lastTime = default(DateTime);
+                                    object md;
+                                    if (TryGetPropertyValue(instRef, "MarketData", out md) && md != null)
+                                    {
+                                        object last;
+                                        if (TryGetPropertyValue(md, "Last", out last) && last != null)
+                                        {
+                                            try
+                                            {
+                                                var pp = last.GetType().GetProperty("Price");
+                                                if (pp != null) { var pv = pp.GetValue(last, null); if (pv != null) lastPrice = Convert.ToDouble(pv); }
+                                                var tp = last.GetType().GetProperty("Time");
+                                                if (tp != null) { var tv = tp.GetValue(last, null); if (tv is DateTime) lastTime = (DateTime)tv; }
+                                            }
+                                            catch { }
+                                        }
+                                    }
+                                    DateTime utcTime = lastTime == default(DateTime) ? default(DateTime) : (lastTime.Kind == DateTimeKind.Utc ? lastTime : lastTime.ToUniversalTime());
+                                    double ageSec = lastTime == default(DateTime) ? -1.0 : (nowUtc - utcTime).TotalSeconds;
+                                    entries.Add("{\"name\":\"" + JsonEscape(nm)
+                                        + "\",\"last_price\":" + lastPrice.ToString("F4")
+                                        + ",\"last_time_utc\":\"" + (lastTime == default(DateTime) ? "" : utcTime.ToString("yyyy-MM-ddTHH:mm:ssZ"))
+                                        + "\",\"age_sec\":" + ageSec.ToString("F1")
+                                        + "}");
+                                }
+                                probes.Add("subscribedThreads count=" + i);
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex) { probes.Add("sub_probe_err:" + ex.Message); }
+
+                // Walk Instrument.All; only emit instruments that actually carry tick data
+                // (MarketData.Last.Price > 0). Report age of last tick in seconds.
+                try
+                {
+                    var instrumentType = Type.GetType("NinjaTrader.Cbi.Instrument, NinjaTrader.Core")
+                        ?? Type.GetType("NinjaTrader.Cbi.Instrument");
+                    if (instrumentType != null)
+                    {
+                        var allProp = instrumentType.GetProperty("All",
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                        var coll = allProp == null ? null : allProp.GetValue(null, null);
+                        var en = coll as System.Collections.IEnumerable;
+                        if (en != null)
+                        {
+                            int total = 0, live = 0;
+                            var nowUtc = DateTime.UtcNow;
+                            foreach (var inst in en)
+                            {
+                                if (inst == null) continue;
+                                total++;
+                                object md;
+                                if (!TryGetPropertyValue(inst, "MarketData", out md) || md == null) continue;
+                                object lastObj;
+                                if (!TryGetPropertyValue(md, "Last", out lastObj) || lastObj == null) continue;
+                                // MarketDataEventArgs.Price (double) + Time (DateTime)
+                                double lastPrice = 0.0;
+                                DateTime lastTime = default(DateTime);
+                                try
+                                {
+                                    var pp = lastObj.GetType().GetProperty("Price");
+                                    if (pp != null)
+                                    {
+                                        var pv = pp.GetValue(lastObj, null);
+                                        if (pv != null) lastPrice = Convert.ToDouble(pv);
+                                    }
+                                    var tp = lastObj.GetType().GetProperty("Time");
+                                    if (tp != null)
+                                    {
+                                        var tv = tp.GetValue(lastObj, null);
+                                        if (tv is DateTime) lastTime = (DateTime)tv;
+                                    }
+                                }
+                                catch { }
+                                // Filter to actually-subscribed instruments. Instrument.MarketDataStub
+                                // is the RealtimeData worker NT attaches when subscription is active.
+                                object stub = null;
+                                var stubField = inst.GetType().GetField("MarketDataStub",
+                                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                                if (stubField != null) stub = stubField.GetValue(inst);
+                                if (stub == null) continue;
+                                live++;
+                                string name = GetAnyStringProperty(inst, new[] { "FullName", "Name" });
+                                DateTime utcTime = lastTime.Kind == DateTimeKind.Utc ? lastTime : lastTime.ToUniversalTime();
+                                double ageSec = lastTime == default(DateTime) ? -1.0 : (nowUtc - utcTime).TotalSeconds;
+                                entries.Add("{\"name\":\"" + JsonEscape(name)
+                                    + "\",\"last_price\":" + lastPrice.ToString("F4")
+                                    + ",\"last_time_utc\":\"" + (lastTime == default(DateTime) ? "" : utcTime.ToString("yyyy-MM-ddTHH:mm:ssZ"))
+                                    + "\",\"age_sec\":" + ageSec.ToString("F1")
+                                    + "}");
+                            }
+                            probes.Add("Instrument.All total=" + total + " live=" + live);
+                        }
+                    }
+                }
+                catch (Exception ex) { probes.Add("walk_err:" + ex.Message); }
+
+                // Dump MarketData declared members so we can see the structure.
+                try
+                {
+                    var md = Type.GetType("NinjaTrader.Data.MarketData, NinjaTrader.Core")
+                        ?? Type.GetType("NinjaTrader.Data.MarketData");
+                    if (md != null)
+                    {
+                        foreach (var p in md.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly))
+                            probes.Add("MD.P:" + p.Name + ":" + p.PropertyType.Name);
+                    }
+                    var mdr = Type.GetType("NinjaTrader.Data.MarketDataEventArgs, NinjaTrader.Core");
+                    if (mdr != null)
+                    {
+                        foreach (var p in mdr.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly))
+                            probes.Add("MDE.P:" + p.Name + ":" + p.PropertyType.Name);
+                    }
+                }
+                catch (Exception ex) { probes.Add("md_probe_err:" + ex.Message); }
+            }, 5000, out err);
+
+            var sb0 = new StringBuilder("{");
+            sb0.Append("\"ok\":").Append(ok ? "true" : "false").Append(",");
+            sb0.Append("\"error\":\"").Append(JsonEscape(err ?? "")).Append("\",");
+            sb0.Append("\"entries\":[").Append(string.Join(",", entries)).Append("],");
+            sb0.Append("\"probes\":[");
+            for (int i = 0; i < probes.Count; i++)
+            {
+                if (i > 0) sb0.Append(",");
+                sb0.Append("\"").Append(JsonEscape(probes[i])).Append("\"");
+            }
+            sb0.Append("]}");
             return sb0.ToString();
         }
 

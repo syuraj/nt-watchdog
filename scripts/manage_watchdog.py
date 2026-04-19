@@ -233,6 +233,48 @@ def cmd_trigger_startup(args: argparse.Namespace) -> None:
     print(f"Startup launcher triggered: {launcher}")
 
 
+def _rdp_script(name: str) -> Path:
+    path = project_root() / "scripts" / name
+    if not path.exists():
+        raise RuntimeError(f"script not found: {path}")
+    return path
+
+
+def cmd_install_rdp_handler(args: argparse.Namespace) -> None:
+    script = _rdp_script("install-rdp-handler.ps1")
+    target_user = args.user or os.environ.get("USERNAME", "")
+    print(f"Installing RDP disconnect handler for user '{target_user}' (requires admin)...")
+    subprocess.run(
+        [
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
+            "-TargetUser", target_user,
+            "-TaskName", args.name,
+        ],
+        check=True,
+    )
+
+
+def cmd_remove_rdp_handler(args: argparse.Namespace) -> None:
+    script = _rdp_script("remove-rdp-handler.ps1")
+    subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-TaskName", args.name],
+        check=True,
+    )
+
+
+def cmd_trigger_rdp_handler(args: argparse.Namespace) -> None:
+    script = _rdp_script("rdp_disconnect_handler.ps1")
+    target_user = args.user or os.environ.get("USERNAME", "")
+    print(f"Invoking RDP handler directly (dry run, target user '{target_user}')...")
+    subprocess.run(
+        [
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
+            "-TargetUser", target_user,
+        ],
+        check=True,
+    )
+
+
 def _simple_yaml_lookup(path: Path, key: str) -> Optional[str]:
     if not path.exists():
         return None
@@ -462,6 +504,19 @@ def build_parser() -> argparse.ArgumentParser:
     s_startup_trigger = sub.add_parser("trigger-startup", help="Run Startup-folder launcher once without relogin.")
     s_startup_trigger.add_argument("--name", default="NT8-Health-Watchdog")
     s_startup_trigger.set_defaults(func=cmd_trigger_startup)
+
+    s_rdp = sub.add_parser("install-rdp-handler", help="Register scheduled task that redirects disconnected RDP sessions to console (prevents NT8 chart freeze). Requires admin.")
+    s_rdp.add_argument("--user", default="", help="Target RDP user (defaults to $USERNAME).")
+    s_rdp.add_argument("--name", default="NT8-RDP-Redirect", help="Scheduled task name.")
+    s_rdp.set_defaults(func=cmd_install_rdp_handler)
+
+    s_rdp_rm = sub.add_parser("remove-rdp-handler", help="Unregister the RDP disconnect handler scheduled task.")
+    s_rdp_rm.add_argument("--name", default="NT8-RDP-Redirect")
+    s_rdp_rm.set_defaults(func=cmd_remove_rdp_handler)
+
+    s_rdp_trig = sub.add_parser("trigger-rdp-handler-now", help="Invoke the RDP handler script directly (no scheduled task needed).")
+    s_rdp_trig.add_argument("--user", default="")
+    s_rdp_trig.set_defaults(func=cmd_trigger_rdp_handler)
 
     s_status = sub.add_parser("status", help="Show bridge/watchdog/startup status in one view.")
     s_status.add_argument("--config", default="")
