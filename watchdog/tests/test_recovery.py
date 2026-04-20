@@ -26,7 +26,7 @@ class FakeBridge:
 
     def enable_all_strategies(self, timeout_sec: int = 15) -> Dict[str, Any]:
         self.enable_strategies_calls = getattr(self, "enable_strategies_calls", 0) + 1
-        return {"method": "uia_toggle", "toggled": 1, "checkbox_count": 1, "error": ""}
+        return {"method": "uia_keypress", "toggled": 1, "checkbox_count": 1, "error": ""}
 
 
 class FakeProcessManager:

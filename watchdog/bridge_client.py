@@ -51,7 +51,7 @@ class BridgeClient:
         try:
             return self.post_json("/strategies/enable_all", body={}, timeout_sec=timeout_sec)
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError) as exc:
-            return {"method": "uia_toggle", "toggled": 0, "error": str(exc)}
+            return {"method": "uia_keypress", "toggled": 0, "error": str(exc)}
 
     def recover_reconnect(self, flatten_first: bool, connection_names: Optional[List[str]] = None) -> Dict[str, Any]:
         endpoint = (

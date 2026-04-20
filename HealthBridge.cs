@@ -43,7 +43,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
         // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
         // Format: UTC timestamp at edit time.
-        private const string BuildId = "2026-04-20T00:15:00Z";
+        private const string BuildId = "2026-04-20T01:00:00Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -2016,10 +2016,12 @@ namespace NinjaTrader.NinjaScript.AddOns
         }
 
 
-        // Spawns a PowerShell that uses UIAutomation to toggle every unchecked
-        // Enabled-checkbox on the CC Strategies grid. NT's internal lifecycle handles
-        // the full state walk once the checkbox flips — same path as a user mouse click.
-        // AutomationId is EnableDisableSingleStrategyCommand (one per visible strategy row).
+        // Spawns a PowerShell that uses UIAutomation to find every unchecked
+        // Enabled-checkbox on the CC Strategies grid and fire a real Space keypress
+        // via SendInput. TogglePattern.Toggle() only flipped the property without
+        // running NT's WPF command binding (so NT reverted); SetFocus + Space routes
+        // through the input manager and activates the strategy for real.
+        // AutomationId is EnableDisableSingleStrategyCommand (one per strategy row).
         private const string _PS_ENABLE_STRATS_SCRIPT = @"
 Add-Type -AssemblyName UIAutomationClient -ErrorAction SilentlyContinue
 Add-Type -AssemblyName UIAutomationTypes  -ErrorAction SilentlyContinue
@@ -2101,97 +2103,8 @@ for ($i=0; $i -lt $cbs.Count; $i++) {
 [Console]::Out.WriteLine(""toggled="" + $toggled + "" count="" + $strategyCount)
 ";
 
-        // Walks every open chart window, finds ChartControl.Strategies (chart-attached
-        // StrategyRenderBase list), and flips IsEnabled=true on each. Matches the
-        // lifecycle the CC checkbox click triggers, but without depending on UI
-        // foreground state. Returns (toggled, total, error).
-        private bool TryEnableStrategiesViaReflection(out int toggled, out int total, out string error)
-        {
-            toggled = 0;
-            total = 0;
-            error = "";
-            int localToggled = 0;
-            int localTotal = 0;
-            string localErr = "";
-            string dispErr;
-            bool dispOk = InvokeOnMainThreadWithTimeout(() =>
-            {
-                try
-                {
-                    foreach (var w in NinjaTrader.Core.Globals.AllWindows)
-                    {
-                        if (w == null) continue;
-                        // Prefer ActiveChartControl (Chart window) or ChartControl (ChartTab).
-                        var wType = w.GetType();
-                        object chartControl = null;
-                        var activeProp = wType.GetProperty("ActiveChartControl");
-                        if (activeProp != null) chartControl = activeProp.GetValue(w, null);
-                        if (chartControl == null)
-                        {
-                            var ccProp = wType.GetProperty("ChartControl");
-                            if (ccProp != null) chartControl = ccProp.GetValue(w, null);
-                        }
-                        if (chartControl == null) continue;
-
-                        var stratsProp = chartControl.GetType().GetProperty("Strategies");
-                        if (stratsProp == null) continue;
-                        var strats = stratsProp.GetValue(chartControl, null) as System.Collections.IEnumerable;
-                        if (strats == null) continue;
-
-                        foreach (var s in strats)
-                        {
-                            if (s == null) continue;
-                            localTotal++;
-                            // StrategyRenderBase.IsEnabled is the direct switch.
-                            var enabledProp = s.GetType().GetProperty("IsEnabled");
-                            if (enabledProp == null || !enabledProp.CanWrite) continue;
-                            try
-                            {
-                                var cur = (bool)enabledProp.GetValue(s, null);
-                                if (cur) continue;
-                                enabledProp.SetValue(s, true, null);
-                                localToggled++;
-                            }
-                            catch (Exception ex2)
-                            {
-                                localErr = (localErr.Length == 0 ? "" : localErr + "; ") + ex2.Message;
-                            }
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    localErr = ex.Message;
-                }
-            }, 5000, out dispErr);
-            if (!dispOk) { error = "dispatch: " + dispErr; return false; }
-            toggled = localToggled;
-            total = localTotal;
-            error = localErr;
-            return true;
-        }
-
         private string EnableAllStrategiesJson()
         {
-            // Try reflection path first — it doesn't depend on foreground/focus
-            // and runs on the NT dispatcher thread, matching the lifecycle NT
-            // expects. Falls back to UIA if reflection doesn't find any rows.
-            int rToggled, rTotal;
-            string rErr;
-            bool rOk = TryEnableStrategiesViaReflection(out rToggled, out rTotal, out rErr);
-            if (rOk && rTotal > 0)
-            {
-                Log("enable_all_strategies (reflection) toggled=" + rToggled + "/" + rTotal + (string.IsNullOrEmpty(rErr) ? "" : " err=" + rErr));
-                var sbR = new StringBuilder("{");
-                sbR.Append("\"method\":\"reflection_setstate\",");
-                sbR.Append("\"toggled\":").Append(rToggled).Append(",");
-                sbR.Append("\"checkbox_count\":").Append(rTotal).Append(",");
-                sbR.Append("\"error\":\"").Append(JsonEscape(rErr)).Append("\"");
-                sbR.Append("}");
-                return sbR.ToString();
-            }
-            Log("enable_all_strategies reflection miss (total=" + rTotal + ") — falling back to UIA");
-
             int toggled = 0;
             int count = 0;
             string errMsg = "";
@@ -2226,7 +2139,10 @@ for ($i=0; $i -lt $cbs.Count; $i++) {
                             toggled = int.Parse(m.Groups[1].Value);
                             count = int.Parse(m.Groups[2].Value);
                         }
-                        if (!string.IsNullOrEmpty(se)) errMsg = se.Trim();
+                        // PowerShell wraps progress records as CLIXML on stderr ("Preparing
+                        // modules for first use"). Harmless noise — strip before logging.
+                        if (!string.IsNullOrEmpty(se) && !se.TrimStart().StartsWith("#< CLIXML"))
+                            errMsg = se.Trim();
                     }
                 }
                 Log("enable_all_strategies (UIA) toggled=" + toggled + "/" + count + (string.IsNullOrEmpty(errMsg) ? "" : " err=" + errMsg));
@@ -2238,7 +2154,7 @@ for ($i=0; $i -lt $cbs.Count; $i++) {
             }
 
             var sb0 = new StringBuilder("{");
-            sb0.Append("\"method\":\"uia_toggle\",");
+            sb0.Append("\"method\":\"uia_keypress\",");
             sb0.Append("\"toggled\":").Append(toggled).Append(",");
             sb0.Append("\"checkbox_count\":").Append(count).Append(",");
             sb0.Append("\"error\":\"").Append(JsonEscape(errMsg)).Append("\"");
