@@ -43,7 +43,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
         // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
         // Format: UTC timestamp at edit time.
-        private const string BuildId = "2026-04-20T04:45:00Z";
+        private const string BuildId = "2026-04-20T05:35:00Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -244,6 +244,9 @@ namespace NinjaTrader.NinjaScript.AddOns
                             break;
                         case "/instruments_debug":
                             body = GetInstrumentsDebugJson();
+                            break;
+                        case "/strategies_debug":
+                            body = GetStrategiesDebugJson();
                             break;
                         case "/orders":
                             body = GetOrdersJson();
@@ -734,139 +737,64 @@ namespace NinjaTrader.NinjaScript.AddOns
             return sb.ToString();
         }
 
-        // Enumerates live strategy instances for read-only status queries
-        // (/runtime_snapshot). Probes several known NT internals via reflection so
-        // the surface adapts across NT8 builds without hard dependencies.
-        // Keys tried, in order:
-        //   1. NinjaTrader.Cbi.DB.dbStrategies  (Dictionary<StrategyBase, Operation>)
-        //   2. Account.All[*].Strategies         (per-account collection)
-        //   3. Globals.AllWindows[*].{ActiveChartControl|ChartControl}.Strategies
-        //      (chart-attached StrategyRenderBase)
-        // Returns { source, total_count, active_count, strategies[], error }.
+        // Scans CC Strategies grid via UI Automation (same source as the enable
+        // command) so the list matches exactly what the user sees — including
+        // disabled rows that drop out of Account.Strategies. Returns
+        // { source, total_count, active_count, strategies[], error }.
         private string GetStrategyRuntimeJson()
         {
             var sb = new StringBuilder("{");
-            string source = "";
-            var rows = new List<string>();
             int total = 0;
             int active = 0;
+            var rows = new List<string>();
             string err = "";
-
-            string dispErr;
-            bool dispOk = InvokeOnMainThreadWithTimeout(() =>
+            try
             {
-                try
+                var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(_PS_SCAN_STRATS_SCRIPT));
+                var psi = new System.Diagnostics.ProcessStartInfo
                 {
-                    // 1. DB.dbStrategies — has every registered strategy instance (active or finalized).
-                    // Try several common field/property names so we survive small NT version differences.
-                    try
+                    FileName = "powershell",
+                    Arguments = "-NoProfile -WindowStyle Hidden -EncodedCommand " + encoded,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                };
+                using (var p = System.Diagnostics.Process.Start(psi))
+                {
+                    if (!p.WaitForExit(15000))
                     {
-                        var dbType = Type.GetType("NinjaTrader.Cbi.DB, NinjaTrader.Core");
-                        System.Collections.IDictionary dict = null;
-                        if (dbType != null)
-                        {
-                            foreach (var memberName in new[] { "dbStrategies", "Strategies", "StrategyMap" })
-                            {
-                                var fi = dbType.GetField(memberName,
-                                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-                                if (fi != null)
-                                {
-                                    dict = fi.GetValue(null) as System.Collections.IDictionary;
-                                    if (dict != null && dict.Count > 0) break;
-                                }
-                                var pi = dbType.GetProperty(memberName,
-                                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-                                if (pi != null)
-                                {
-                                    dict = pi.GetValue(null, null) as System.Collections.IDictionary;
-                                    if (dict != null && dict.Count > 0) break;
-                                }
-                            }
-                        }
-                        if (dict != null && dict.Count > 0)
-                        {
-                            source = "dbStrategies";
-                            foreach (System.Collections.DictionaryEntry kv in dict)
-                            {
-                                var entry = RenderStrategyEntry(kv.Key);
-                                if (entry == null) continue;
-                                rows.Add(entry.Item1);
-                                total++;
-                                if (entry.Item2) active++;
-                            }
-                        }
+                        try { p.Kill(); } catch { }
+                        err = "powershell timeout";
                     }
-                    catch (Exception ex1) { err = (err.Length == 0 ? "" : err + "; ") + "db:" + ex1.Message; }
-
-                    // 2. Account.All.Strategies
-                    if (rows.Count == 0)
+                    else
                     {
-                        try
+                        string so = p.StandardOutput.ReadToEnd() ?? "";
+                        string se = p.StandardError.ReadToEnd() ?? "";
+                        foreach (var raw in so.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
                         {
-                            foreach (var acc in NinjaTrader.Cbi.Account.All)
-                            {
-                                var stratsProp = acc.GetType().GetProperty("Strategies");
-                                if (stratsProp == null) continue;
-                                var strats = stratsProp.GetValue(acc, null) as System.Collections.IEnumerable;
-                                if (strats == null) continue;
-                                foreach (var s in strats)
-                                {
-                                    var entry = RenderStrategyEntry(s);
-                                    if (entry == null) continue;
-                                    rows.Add(entry.Item1);
-                                    total++;
-                                    if (entry.Item2) active++;
-                                }
-                            }
-                            if (rows.Count > 0) source = "account_strategies";
+                            // Each line: "NAME|STATE" where STATE is "On" or "Off"
+                            var line = raw.Trim();
+                            int sep = line.IndexOf('|');
+                            if (sep <= 0) continue;
+                            string name = line.Substring(0, sep);
+                            bool isOn = line.Substring(sep + 1) == "On";
+                            total++;
+                            if (isOn) active++;
+                            var j = new StringBuilder("{");
+                            j.Append("\"name\":\"").Append(JsonEscape(name)).Append("\",");
+                            j.Append("\"is_enabled\":").Append(isOn ? "true" : "false");
+                            j.Append("}");
+                            rows.Add(j.ToString());
                         }
-                        catch (Exception ex2) { err = (err.Length == 0 ? "" : err + "; ") + "acc:" + ex2.Message; }
-                    }
-
-                    // 3. Walk chart windows for ChartControl.Strategies
-                    if (rows.Count == 0)
-                    {
-                        try
-                        {
-                            foreach (var w in NinjaTrader.Core.Globals.AllWindows)
-                            {
-                                if (w == null) continue;
-                                var wType = w.GetType();
-                                object cc = null;
-                                var activeProp = wType.GetProperty("ActiveChartControl");
-                                if (activeProp != null) cc = activeProp.GetValue(w, null);
-                                if (cc == null)
-                                {
-                                    var ccProp = wType.GetProperty("ChartControl");
-                                    if (ccProp != null) cc = ccProp.GetValue(w, null);
-                                }
-                                if (cc == null) continue;
-                                var stratsProp = cc.GetType().GetProperty("Strategies");
-                                if (stratsProp == null) continue;
-                                var strats = stratsProp.GetValue(cc, null) as System.Collections.IEnumerable;
-                                if (strats == null) continue;
-                                foreach (var s in strats)
-                                {
-                                    var entry = RenderStrategyEntry(s);
-                                    if (entry == null) continue;
-                                    rows.Add(entry.Item1);
-                                    total++;
-                                    if (entry.Item2) active++;
-                                }
-                            }
-                            if (rows.Count > 0) source = "chart_strategies";
-                        }
-                        catch (Exception ex3) { err = (err.Length == 0 ? "" : err + "; ") + "chart:" + ex3.Message; }
+                        if (!string.IsNullOrEmpty(se) && !se.TrimStart().StartsWith("#< CLIXML"))
+                            err = se.Trim();
                     }
                 }
-                catch (Exception ex)
-                {
-                    err = (err.Length == 0 ? "" : err + "; ") + ex.Message;
-                }
-            }, 3000, out dispErr);
-            if (!dispOk) err = (err.Length == 0 ? "dispatch:" : err + "; dispatch:") + dispErr;
+            }
+            catch (Exception ex) { err = ex.Message; }
 
-            sb.Append("\"source\":\"").Append(JsonEscape(source)).Append("\",");
+            sb.Append("\"source\":\"uia_scan\",");
             sb.Append("\"total_count\":").Append(total).Append(",");
             sb.Append("\"active_count\":").Append(active).Append(",");
             sb.Append("\"strategies\":[");
@@ -880,6 +808,53 @@ namespace NinjaTrader.NinjaScript.AddOns
             sb.Append("}");
             return sb.ToString();
         }
+
+        // UIA read-only scan of the CC Strategies grid. Produces one line per
+        // row: "<strategy name>|<On|Off>". Walks up to the DataItem ancestor,
+        // then scans its descendant cells for one whose AutomationId is
+        // 'Strategy' (the strategy-name column binding).
+        private const string _PS_SCAN_STRATS_SCRIPT = @"
+Add-Type -AssemblyName UIAutomationClient -ErrorAction SilentlyContinue
+Add-Type -AssemblyName UIAutomationTypes  -ErrorAction SilentlyContinue
+$auto = [System.Windows.Automation.AutomationElement]
+$tree = [System.Windows.Automation.TreeScope]
+$cond = New-Object System.Windows.Automation.PropertyCondition($auto::ClassNameProperty, 'ControlCenter')
+$win = $auto::RootElement.FindFirst($tree::Children, $cond)
+if (-not $win) { exit 2 }
+$cbCond = New-Object System.Windows.Automation.PropertyCondition($auto::ControlTypeProperty, [System.Windows.Automation.ControlType]::CheckBox)
+$cbs = $win.FindAll($tree::Descendants, $cbCond)
+$walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+for ($i=0; $i -lt $cbs.Count; $i++) {
+    $cb = $cbs.Item($i)
+    if ($cb.Current.AutomationId -ne 'EnableDisableSingleStrategyCommand') { continue }
+    try {
+        $tp = $cb.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
+        $state = 'Off'
+        if ($tp.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On) { $state = 'On' }
+
+        # Find DataItem ancestor (the row).
+        $row = $walker.GetParent($cb)
+        for ($j=0; $j -lt 8 -and $row -ne $null; $j++) {
+            if ($row.Current.ControlType -eq [System.Windows.Automation.ControlType]::DataItem) { break }
+            $row = $walker.GetParent($row)
+        }
+        $rowName = ''
+        if ($row -ne $null) {
+            # CC rows use AutomationId 'RecordRow<n>_Strategy' for the name cell.
+            $all = $row.FindAll($tree::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+            for ($k=0; $k -lt $all.Count; $k++) {
+                $el = $all.Item($k)
+                if ($el.Current.AutomationId -like 'RecordRow*_Strategy') {
+                    $rowName = $el.Current.Name
+                    break
+                }
+            }
+        }
+        if ([string]::IsNullOrEmpty($rowName)) { $rowName = 'unknown' }
+        [Console]::Out.WriteLine($rowName + '|' + $state)
+    } catch { }
+}
+";
 
         // Extracts a small JSON record for one strategy instance via reflection.
         // Returns (jsonObject, isActive) or null when the object isn't
@@ -2392,7 +2367,173 @@ for ($i=0; $i -lt $cbs.Count; $i++) {
             return sb0.ToString();
         }
 
-        // One-shot diagnostic: probes common NT API surfaces for a subscription /
+        // Recursively walks WPF LogicalTree/VisualTree descendants from root,
+        // collecting hits where the type name contains needle. Records a few
+        // key bindings (DataContext, ItemsSource) so we can see what a grid is
+        // actually bound to.
+        private void WalkWpfTree(object root, string needle, int depth, int maxDepth, List<string> lines)
+        {
+            if (root == null || depth > maxDepth) return;
+            try
+            {
+                var t = root.GetType();
+                if (t.FullName != null && t.FullName.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    lines.Add(new string(' ', depth * 2) + "HIT " + t.FullName);
+                    // Try read DataContext and ItemsSource
+                    try
+                    {
+                        var dcProp = t.GetProperty("DataContext");
+                        var dc = dcProp == null ? null : dcProp.GetValue(root, null);
+                        if (dc != null) lines.Add(new string(' ', depth * 2) + "  DataContext: " + dc.GetType().FullName);
+                    }
+                    catch { }
+                    try
+                    {
+                        var isProp = t.GetProperty("ItemsSource");
+                        var src = isProp == null ? null : isProp.GetValue(root, null);
+                        if (src != null)
+                        {
+                            var st = src.GetType();
+                            int cnt = -1;
+                            if (src is System.Collections.ICollection) cnt = ((System.Collections.ICollection)src).Count;
+                            lines.Add(new string(' ', depth * 2) + "  ItemsSource: " + st.FullName + " count=" + cnt);
+                            if (src is System.Collections.IEnumerable)
+                            {
+                                int i = 0;
+                                foreach (var it in (System.Collections.IEnumerable)src)
+                                {
+                                    if (i++ > 15) { lines.Add(new string(' ', depth * 2) + "  ... truncated"); break; }
+                                    if (it == null) { lines.Add(new string(' ', depth * 2) + "  [" + (i - 1) + "] null"); continue; }
+                                    string rowName = "";
+                                    try { var np = it.GetType().GetProperty("Name"); if (np != null) rowName = (np.GetValue(it, null) as string) ?? ""; }
+                                    catch { }
+                                    string rowEn = "";
+                                    try { var ep = it.GetType().GetProperty("IsEnabled"); var ev = ep == null ? null : ep.GetValue(it, null); if (ev != null) rowEn = ev.ToString(); }
+                                    catch { }
+                                    lines.Add(new string(' ', depth * 2) + "  [" + (i - 1) + "] " + it.GetType().Name + " name='" + rowName + "' IsEnabled=" + rowEn);
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            // Walk visual tree children via reflection (depends on WPF)
+            try
+            {
+                var vtType = Type.GetType("System.Windows.Media.VisualTreeHelper, PresentationCore");
+                if (vtType == null) return;
+                var countMi = vtType.GetMethod("GetChildrenCount", new[] { typeof(object) });
+                var getMi = vtType.GetMethod("GetChild", new[] { typeof(object), typeof(int) });
+                if (countMi == null || getMi == null) return;
+                int n = 0;
+                try { n = (int)countMi.Invoke(null, new[] { root }); } catch { return; }
+                for (int i = 0; i < n; i++)
+                {
+                    object child = null;
+                    try { child = getMi.Invoke(null, new[] { root, (object)i }); } catch { }
+                    if (child != null) WalkWpfTree(child, needle, depth + 1, maxDepth, lines);
+                }
+            }
+            catch { }
+        }
+
+        // One-shot diagnostic: probes NT assemblies for collections that back
+        // the Control Center Strategies grid (which includes disabled rows NOT
+        // in Account.Strategies). Dumps type + member names + element counts.
+        private string GetStrategiesDebugJson()
+        {
+            var lines = new List<string>();
+            string err;
+            bool ok = InvokeOnMainThreadWithTimeout(() =>
+            {
+                // Walk Globals.AllWindows, find Control Center, descend to the
+                // StrategiesGrid instance, read its ItemsSource (WPF DataContext).
+                try
+                {
+                    foreach (var w in NinjaTrader.Core.Globals.AllWindows)
+                    {
+                        if (w == null) continue;
+                        var tn = w.GetType().FullName ?? "";
+                        if (tn.IndexOf("ControlCenter", StringComparison.OrdinalIgnoreCase) < 0
+                            && tn.IndexOf("MainWindow", StringComparison.OrdinalIgnoreCase) < 0)
+                        {
+                            lines.Add("skip window: " + tn);
+                            continue;
+                        }
+                        lines.Add("FOUND CC-like window: " + tn);
+                        WalkWpfTree(w, "StrategiesGrid", 0, 8, lines);
+                    }
+                }
+                catch (Exception exW) { lines.Add("window walk error: " + exW.Message); }
+
+                var candidates = new[] {
+                    "NinjaTrader.Cbi.DB, NinjaTrader.Core",
+                    "NinjaTrader.Core.Globals, NinjaTrader.Core",
+                    "NinjaTrader.Gui.NinjaScript.StrategiesGrid, NinjaTrader.Gui",
+                    "NinjaTrader.Gui.NinjaScript.StrategyCommands, NinjaTrader.Gui",
+                };
+                foreach (var qn in candidates)
+                {
+                    Type t = Type.GetType(qn);
+                    if (t == null) { lines.Add("MISSING " + qn); continue; }
+                    lines.Add("TYPE " + t.FullName);
+                    var flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
+                    foreach (var f in t.GetFields(flags))
+                    {
+                        var ft = f.FieldType;
+                        var fn = f.Name.ToLowerInvariant();
+                        bool nameHit = fn.Contains("strateg") || fn.Contains("grid") || fn == "all";
+                        bool typeHit = ft.Name.IndexOf("Dictionary", StringComparison.OrdinalIgnoreCase) >= 0
+                            || ft.Name.IndexOf("List", StringComparison.OrdinalIgnoreCase) >= 0
+                            || ft.Name.IndexOf("Collection", StringComparison.OrdinalIgnoreCase) >= 0;
+                        if (!(nameHit || typeHit)) continue;
+                        int cnt = -1;
+                        try
+                        {
+                            var v = f.GetValue(null);
+                            if (v is System.Collections.ICollection) cnt = ((System.Collections.ICollection)v).Count;
+                        }
+                        catch { }
+                        lines.Add("  F " + f.Name + " : " + ft.Name + " count=" + cnt);
+                    }
+                    foreach (var p in t.GetProperties(flags))
+                    {
+                        var pt = p.PropertyType;
+                        var pn = p.Name.ToLowerInvariant();
+                        bool nameHit = pn.Contains("strateg") || pn.Contains("grid") || pn == "all";
+                        bool typeHit = pt.Name.IndexOf("Dictionary", StringComparison.OrdinalIgnoreCase) >= 0
+                            || pt.Name.IndexOf("List", StringComparison.OrdinalIgnoreCase) >= 0
+                            || pt.Name.IndexOf("Collection", StringComparison.OrdinalIgnoreCase) >= 0;
+                        if (!(nameHit || typeHit)) continue;
+                        int cnt = -1;
+                        try
+                        {
+                            var v = p.GetValue(null, null);
+                            if (v is System.Collections.ICollection) cnt = ((System.Collections.ICollection)v).Count;
+                        }
+                        catch { }
+                        lines.Add("  P " + p.Name + " : " + pt.Name + " count=" + cnt);
+                    }
+                }
+            }, 3000, out err);
+
+            var sb = new StringBuilder("{");
+            sb.Append("\"ok\":").Append(ok ? "true" : "false").Append(",");
+            sb.Append("\"error\":\"").Append(JsonEscape(err ?? "")).Append("\",");
+            sb.Append("\"lines\":[");
+            for (int i = 0; i < lines.Count; i++)
+            {
+                if (i > 0) sb.Append(",");
+                sb.Append("\"").Append(JsonEscape(lines[i])).Append("\"");
+            }
+            sb.Append("]}");
+            return sb.ToString();
+        }
+
+        // One-shot diagnostic: probes NT API surfaces for a subscription /
         // last-tick accessor. Dumps type shapes + any instrument-like entries so
         // we can identify the field to read for tick freshness detection.
         private string GetInstrumentsDebugJson()
