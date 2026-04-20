@@ -43,7 +43,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
         // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
         // Format: UTC timestamp at edit time.
-        private const string BuildId = "2026-04-19T05:15:00Z";
+        private const string BuildId = "2026-04-20T00:15:00Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -2023,11 +2023,51 @@ namespace NinjaTrader.NinjaScript.AddOns
         private const string _PS_ENABLE_STRATS_SCRIPT = @"
 Add-Type -AssemblyName UIAutomationClient -ErrorAction SilentlyContinue
 Add-Type -AssemblyName UIAutomationTypes  -ErrorAction SilentlyContinue
+
+# SendInput SPACE keypress — fires the full WPF command chain bound to the
+# checkbox (same as a keyboard Space press by a user). Doesn't require
+# foreground window rights like SetCursorPos does, so it works reliably even
+# when another window has focus.
+$sig = @'
+using System;
+using System.Runtime.InteropServices;
+public static class KbdInput {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct INPUT { public uint type; public InputUnion U; }
+    [StructLayout(LayoutKind.Explicit)]
+    public struct InputUnion {
+        [FieldOffset(0)] public MOUSEINPUT mi;
+        [FieldOffset(0)] public KEYBDINPUT ki;
+        [FieldOffset(0)] public HARDWAREINPUT hi;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct HARDWAREINPUT { public uint uMsg; public ushort wParamL; public ushort wParamH; }
+    [DllImport(""user32.dll"")] public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+    public const ushort VK_SPACE = 0x20;
+    public const uint KEYEVENTF_KEYUP = 0x0002;
+    public static void PressSpace() {
+        var inputs = new INPUT[2];
+        inputs[0].type = 1; // INPUT_KEYBOARD
+        inputs[0].U.ki.wVk = VK_SPACE;
+        inputs[1].type = 1;
+        inputs[1].U.ki.wVk = VK_SPACE;
+        inputs[1].U.ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(2, inputs, Marshal.SizeOf(typeof(INPUT)));
+    }
+}
+'@
+Add-Type -TypeDefinition $sig -ErrorAction SilentlyContinue
+
 $auto = [System.Windows.Automation.AutomationElement]
 $tree = [System.Windows.Automation.TreeScope]
 $cond = New-Object System.Windows.Automation.PropertyCondition($auto::ClassNameProperty, 'ControlCenter')
 $win = $auto::RootElement.FindFirst($tree::Children, $cond)
 if (-not $win) { exit 2 }
+
 $cbCond = New-Object System.Windows.Automation.PropertyCondition($auto::ControlTypeProperty, [System.Windows.Automation.ControlType]::CheckBox)
 $cbs = $win.FindAll($tree::Descendants, $cbCond)
 $toggled = 0
@@ -2038,18 +2078,120 @@ for ($i=0; $i -lt $cbs.Count; $i++) {
     $strategyCount++
     try {
         $tp = $cb.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
-        if ($tp.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::On) {
-            $tp.Toggle()
+        if ($tp.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On) { continue }
+
+        try { $cb.GetCurrentPattern([System.Windows.Automation.ScrollItemPattern]::Pattern).ScrollIntoView() } catch { }
+
+        $attempt = 0
+        while ($attempt -lt 3) {
+            $tp = $cb.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
+            if ($tp.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On) { break }
+            try { $cb.SetFocus() } catch { }
+            Start-Sleep -Milliseconds 150
+            [KbdInput]::PressSpace()
+            Start-Sleep -Seconds (3 + $attempt * 2)
+            $attempt++
+        }
+        $tp = $cb.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
+        if ($tp.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On) {
             $toggled++
-            Start-Sleep -Milliseconds 400
         }
     } catch { }
 }
 [Console]::Out.WriteLine(""toggled="" + $toggled + "" count="" + $strategyCount)
 ";
 
+        // Walks every open chart window, finds ChartControl.Strategies (chart-attached
+        // StrategyRenderBase list), and flips IsEnabled=true on each. Matches the
+        // lifecycle the CC checkbox click triggers, but without depending on UI
+        // foreground state. Returns (toggled, total, error).
+        private bool TryEnableStrategiesViaReflection(out int toggled, out int total, out string error)
+        {
+            toggled = 0;
+            total = 0;
+            error = "";
+            int localToggled = 0;
+            int localTotal = 0;
+            string localErr = "";
+            string dispErr;
+            bool dispOk = InvokeOnMainThreadWithTimeout(() =>
+            {
+                try
+                {
+                    foreach (var w in NinjaTrader.Core.Globals.AllWindows)
+                    {
+                        if (w == null) continue;
+                        // Prefer ActiveChartControl (Chart window) or ChartControl (ChartTab).
+                        var wType = w.GetType();
+                        object chartControl = null;
+                        var activeProp = wType.GetProperty("ActiveChartControl");
+                        if (activeProp != null) chartControl = activeProp.GetValue(w, null);
+                        if (chartControl == null)
+                        {
+                            var ccProp = wType.GetProperty("ChartControl");
+                            if (ccProp != null) chartControl = ccProp.GetValue(w, null);
+                        }
+                        if (chartControl == null) continue;
+
+                        var stratsProp = chartControl.GetType().GetProperty("Strategies");
+                        if (stratsProp == null) continue;
+                        var strats = stratsProp.GetValue(chartControl, null) as System.Collections.IEnumerable;
+                        if (strats == null) continue;
+
+                        foreach (var s in strats)
+                        {
+                            if (s == null) continue;
+                            localTotal++;
+                            // StrategyRenderBase.IsEnabled is the direct switch.
+                            var enabledProp = s.GetType().GetProperty("IsEnabled");
+                            if (enabledProp == null || !enabledProp.CanWrite) continue;
+                            try
+                            {
+                                var cur = (bool)enabledProp.GetValue(s, null);
+                                if (cur) continue;
+                                enabledProp.SetValue(s, true, null);
+                                localToggled++;
+                            }
+                            catch (Exception ex2)
+                            {
+                                localErr = (localErr.Length == 0 ? "" : localErr + "; ") + ex2.Message;
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    localErr = ex.Message;
+                }
+            }, 5000, out dispErr);
+            if (!dispOk) { error = "dispatch: " + dispErr; return false; }
+            toggled = localToggled;
+            total = localTotal;
+            error = localErr;
+            return true;
+        }
+
         private string EnableAllStrategiesJson()
         {
+            // Try reflection path first — it doesn't depend on foreground/focus
+            // and runs on the NT dispatcher thread, matching the lifecycle NT
+            // expects. Falls back to UIA if reflection doesn't find any rows.
+            int rToggled, rTotal;
+            string rErr;
+            bool rOk = TryEnableStrategiesViaReflection(out rToggled, out rTotal, out rErr);
+            if (rOk && rTotal > 0)
+            {
+                Log("enable_all_strategies (reflection) toggled=" + rToggled + "/" + rTotal + (string.IsNullOrEmpty(rErr) ? "" : " err=" + rErr));
+                var sbR = new StringBuilder("{");
+                sbR.Append("\"method\":\"reflection_setstate\",");
+                sbR.Append("\"toggled\":").Append(rToggled).Append(",");
+                sbR.Append("\"checkbox_count\":").Append(rTotal).Append(",");
+                sbR.Append("\"error\":\"").Append(JsonEscape(rErr)).Append("\"");
+                sbR.Append("}");
+                return sbR.ToString();
+            }
+            Log("enable_all_strategies reflection miss (total=" + rTotal + ") — falling back to UIA");
+
             int toggled = 0;
             int count = 0;
             string errMsg = "";
@@ -2069,7 +2211,7 @@ for ($i=0; $i -lt $cbs.Count; $i++) {
                 };
                 using (var p = System.Diagnostics.Process.Start(psi))
                 {
-                    if (!p.WaitForExit(10000))
+                    if (!p.WaitForExit(60000))
                     {
                         try { p.Kill(); } catch { }
                         errMsg = "powershell timeout";

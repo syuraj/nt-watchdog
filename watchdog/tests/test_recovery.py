@@ -57,6 +57,11 @@ class FakeNotifier:
 
 
 class RecoveryTests(unittest.TestCase):
+    def _make_manager(self, **kwargs: Any) -> RecoveryManager:
+        manager = RecoveryManager(**kwargs)
+        manager.post_reconnect_delay_sec = 0
+        return manager
+
     def _build_config(self, temp_dir: str) -> WatchdogConfig:
         return WatchdogConfig(
             reconnect_attempt_limit=1,
@@ -76,7 +81,7 @@ class RecoveryTests(unittest.TestCase):
             process = FakeProcessManager(restart_ok=True)
             notifier = FakeNotifier()
 
-            manager = RecoveryManager(
+            manager = self._make_manager(
                 config=cfg,
                 bridge=bridge,  # type: ignore[arg-type]
                 process_manager=process,  # type: ignore[arg-type]
@@ -104,7 +109,7 @@ class RecoveryTests(unittest.TestCase):
             process = FakeProcessManager(restart_ok=True, redirect_ok=True)
             notifier = FakeNotifier()
 
-            manager = RecoveryManager(
+            manager = self._make_manager(
                 config=cfg,
                 bridge=bridge,  # type: ignore[arg-type]
                 process_manager=process,  # type: ignore[arg-type]
@@ -130,7 +135,7 @@ class RecoveryTests(unittest.TestCase):
             process = FakeProcessManager(restart_ok=True)
             notifier = FakeNotifier()
 
-            manager = RecoveryManager(
+            manager = self._make_manager(
                 config=cfg,
                 bridge=bridge,  # type: ignore[arg-type]
                 process_manager=process,  # type: ignore[arg-type]
@@ -152,7 +157,7 @@ class RecoveryTests(unittest.TestCase):
             process = FakeProcessManager(restart_ok=True)
             notifier = FakeNotifier()
 
-            manager = RecoveryManager(
+            manager = self._make_manager(
                 config=cfg,
                 bridge=bridge,  # type: ignore[arg-type]
                 process_manager=process,  # type: ignore[arg-type]
@@ -175,7 +180,7 @@ class RecoveryTests(unittest.TestCase):
             process = FakeProcessManager(restart_ok=True)
             notifier = FakeNotifier()
 
-            manager = RecoveryManager(
+            manager = self._make_manager(
                 config=cfg,
                 bridge=bridge,  # type: ignore[arg-type]
                 process_manager=process,  # type: ignore[arg-type]
@@ -202,7 +207,7 @@ class RecoveryTests(unittest.TestCase):
             process = FakeProcessManager(restart_ok=True)
             notifier = FakeNotifier()
 
-            manager = RecoveryManager(
+            manager = self._make_manager(
                 config=cfg,
                 bridge=bridge,  # type: ignore[arg-type]
                 process_manager=process,  # type: ignore[arg-type]
@@ -231,7 +236,7 @@ class RecoveryTests(unittest.TestCase):
             process = FakeProcessManager(restart_ok=True)
             notifier = FakeNotifier()
 
-            manager = RecoveryManager(
+            manager = self._make_manager(
                 config=cfg,
                 bridge=bridge,  # type: ignore[arg-type]
                 process_manager=process,  # type: ignore[arg-type]
@@ -274,7 +279,7 @@ class RecoveryTests(unittest.TestCase):
             runtime["awaiting_restore"] = True
             state.save_runtime_state(runtime)
 
-            manager = RecoveryManager(
+            manager = self._make_manager(
                 config=cfg,
                 bridge=bridge,  # type: ignore[arg-type]
                 process_manager=process,  # type: ignore[arg-type]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from uuid import uuid4
@@ -33,6 +34,7 @@ class RecoveryManager:
         self.notifier = notifier or TelegramNotifier(config)
         self.restorer = restorer or StrategyUiRestorer()
         self.runtime_state = self.state_store.load_runtime_state()
+        self.post_reconnect_delay_sec = 15
 
     def _persist_runtime(self) -> None:
         self.state_store.save_runtime_state(self.runtime_state)
@@ -330,6 +332,7 @@ class RecoveryManager:
             self.runtime_state["reconnect_failures"] = 0
             self._persist_runtime()
             if attempt["success"]:
+                time.sleep(self.post_reconnect_delay_sec)
                 strat_result = self.bridge.enable_all_strategies()
                 self.state_store.append_event(
                     {
@@ -382,6 +385,10 @@ class RecoveryManager:
         if reconnect_ok:
             self.runtime_state["reconnect_failures"] = 0
             self._persist_runtime()
+            # Give NT time for account/broker subscription to finish after the
+            # connection reports Connected — strategy activation fails silently
+            # when account isn't yet fully bound.
+            time.sleep(self.post_reconnect_delay_sec)
             # After a successful reconnect, re-enable any strategies that went offline
             # when the broker dropped. Idempotent — already-enabled rows are skipped.
             strat_result = self.bridge.enable_all_strategies()
