@@ -25,7 +25,8 @@ class FakeBridge:
         return self.reconnect_results[idx]
 
     def enable_all_strategies(self, timeout_sec: int = 15) -> Dict[str, Any]:
-        return {"method": "uia_toggle", "toggled": 0, "checkbox_count": 0, "error": ""}
+        self.enable_strategies_calls = getattr(self, "enable_strategies_calls", 0) + 1
+        return {"method": "uia_toggle", "toggled": 1, "checkbox_count": 1, "error": ""}
 
 
 class FakeProcessManager:
@@ -189,6 +190,8 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(result["action"], "reconnect")
             self.assertEqual(bridge.calls, 1)
             self.assertEqual(process.restart_calls, 0)
+            self.assertEqual(getattr(bridge, "enable_strategies_calls", 0), 1)
+            self.assertEqual(result.get("strategies_toggled"), 1)
 
     def test_no_connections_detected_respects_recovery_cooldown(self) -> None:
         with tempfile.TemporaryDirectory() as td:

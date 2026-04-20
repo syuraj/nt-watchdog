@@ -2031,9 +2031,11 @@ if (-not $win) { exit 2 }
 $cbCond = New-Object System.Windows.Automation.PropertyCondition($auto::ControlTypeProperty, [System.Windows.Automation.ControlType]::CheckBox)
 $cbs = $win.FindAll($tree::Descendants, $cbCond)
 $toggled = 0
+$strategyCount = 0
 for ($i=0; $i -lt $cbs.Count; $i++) {
     $cb = $cbs.Item($i)
     if ($cb.Current.AutomationId -ne 'EnableDisableSingleStrategyCommand') { continue }
+    $strategyCount++
     try {
         $tp = $cb.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
         if ($tp.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::On) {
@@ -2043,7 +2045,7 @@ for ($i=0; $i -lt $cbs.Count; $i++) {
         }
     } catch { }
 }
-Write-Host (""toggled="" + $toggled + "" count="" + $cbs.Count)
+[Console]::Out.WriteLine(""toggled="" + $toggled + "" count="" + $strategyCount)
 ";
 
         private string EnableAllStrategiesJson()

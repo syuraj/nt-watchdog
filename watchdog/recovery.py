@@ -330,15 +330,30 @@ class RecoveryManager:
             self.runtime_state["reconnect_failures"] = 0
             self._persist_runtime()
             if attempt["success"]:
+                strat_result = self.bridge.enable_all_strategies()
+                self.state_store.append_event(
+                    {
+                        "kind": "strategies_enable",
+                        "toggled": strat_result.get("toggled", 0),
+                        "checkbox_count": strat_result.get("checkbox_count", 0),
+                        "details": strat_result,
+                    }
+                )
                 notify_meta = self._notify(
                     "reconnect_success",
-                    {"status": status, "action": "reconnect", "reason": "no_connections_reconnect_success"},
+                    {
+                        "status": status,
+                        "action": "reconnect",
+                        "reason": "no_connections_reconnect_success",
+                        "strategies_toggled": strat_result.get("toggled", 0),
+                    },
                 )
                 result = {
                     "state": "recovering",
                     "action": "reconnect",
                     "reason": "no_connections_reconnect_success",
                     "incident_id": incident_id,
+                    "strategies_toggled": strat_result.get("toggled", 0),
                 }
                 result.update(notify_meta)
                 return result

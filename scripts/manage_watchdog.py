@@ -79,6 +79,17 @@ def setup(args: argparse.Namespace) -> None:
     if args.nt_executable_path:
         set_yaml_scalar(cfg, "nt_executable_path", args.nt_executable_path, quote=True)
 
+    # Copy HealthBridge.cs to NT AddOns folder so NinjaScript can compile it.
+    bridge_src = root / "HealthBridge.cs"
+    addons_dir = Path(os.path.expanduser("~")) / "Documents" / "NinjaTrader 8" / "bin" / "Custom" / "AddOns"
+    if bridge_src.exists() and addons_dir.exists():
+        bridge_dst = addons_dir / "HealthBridge.cs"
+        shutil.copy2(bridge_src, bridge_dst)
+        print(f"Copied bridge: {bridge_dst}")
+        print("  -> open NinjaTrader > NinjaScript > Compile (F5) to load changes.")
+    elif not addons_dir.exists():
+        print(f"NT AddOns folder not found at {addons_dir}; skipping bridge copy.")
+
     print("\nSetup complete.")
     print(f"Run watchdog: {py} -m watchdog.monitor --config {cfg}")
 

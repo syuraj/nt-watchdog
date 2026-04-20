@@ -18,20 +18,18 @@ Two parts:
 - Deduplicates repeat incident alerts during cooldown (`notification_cooldown_sec`).
 
 ## Quick Setup (Python-first)
-1. Copy bridge source to NT8 AddOns folder:
-   - `C:\Users\<you>\Documents\NinjaTrader 8\bin\Custom\AddOns\HealthBridge.cs`
-2. In NinjaTrader, compile NinjaScript so `HealthBridge` loads.
-3. From repo root, run setup:
-   - `python scripts/manage_watchdog.py setup --bridge-url http://localhost:8899`
-   - Default NT exe path is `C:\Program Files\NinjaTrader 8\bin\NinjaTrader.exe`. If different, pass `--nt-executable-path "C:\Your\Path\NinjaTrader.exe"
-4. Install RDP disconnect handler (elevated shell) — prevents chart freeze on disconnect:
+1. From repo root, run setup (creates venv, installs deps, copies `HealthBridge.cs` to NT8 AddOns folder):
+   - `python scripts/manage_watchdog.py setup`
+   - Defaults: bridge URL `http://localhost:8899`, NT exe path `C:\Program Files\NinjaTrader 8\bin\NinjaTrader.exe`. Override with `--bridge-url <url>` or `--nt-executable-path "C:\Your\Path\NinjaTrader.exe"` (find NT exe via right-click Start Menu shortcut → "Open file location" → Properties → Target).
+2. In NinjaTrader: NinjaScript → Compile (F5) so `HealthBridge` loads.
+3. Install RDP disconnect handler (elevated shell) — prevents chart freeze on disconnect:
    - `python scripts/manage_watchdog.py install-rdp-handler`
-5. (Optional) Configure Telegram alerts — edit `watchdog/config.yaml`:
+4. (Optional) Configure Telegram alerts — edit `watchdog/config.yaml`:
    ```yaml
    telegram_bot_token: "<token>"
    telegram_chat_id: "<chat_id>"
    ```
-6. Start watchdog:
+5. Start watchdog:
    - `python scripts/manage_watchdog.py run`
 
 Optional env overrides:
@@ -56,17 +54,8 @@ Optional env overrides:
 - trigger startup now (without relogin):
   - `python scripts/manage_watchdog.py trigger-startup`
 
-## RDP Disconnect Handler (prevent chart freeze)
-
-NT8 chart rendering freezes when an RDP session disconnects (WPF/Direct3D detaches from GPU). A scheduled task triggered on Event ID 24 redirects the disconnected session to console via `tscon`, keeping rendering alive.
-
-Install (run from elevated shell):
-- `python scripts/manage_watchdog.py install-rdp-handler`
-
-Remove:
-- `python scripts/manage_watchdog.py remove-rdp-handler`
-
-Log: `watchdog/logs/rdp_handler.log`.
+## RDP Disconnect Handler
+Scheduled task triggered on TerminalServices Event ID 24 runs `tscon /dest:console` to re-attach the disconnected session, keeping WPF/Direct3D rendering alive. Install via step 3 above. Remove with `python scripts/manage_watchdog.py remove-rdp-handler`. Log: `watchdog/logs/rdp_handler.log`.
 
 ## Logs and State
 - Runtime events: `watchdog/logs/health_events.jsonl`
