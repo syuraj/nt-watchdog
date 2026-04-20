@@ -43,7 +43,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
         // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
         // Format: UTC timestamp at edit time.
-        private const string BuildId = "2026-04-20T01:00:00Z";
+        private const string BuildId = "2026-04-20T04:45:00Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -728,9 +728,239 @@ namespace NinjaTrader.NinjaScript.AddOns
             sb.Append("\"blocking_windows\":").Append(GetBlockingWindowsJson(out blockingCount)).Append(",");
             sb.Append("\"blocking_windows_count\":").Append(blockingCount).Append(",");
             sb.Append("\"accounts\":").Append(GetAccountsJson()).Append(",");
-            sb.Append("\"positions\":").Append(GetPositionsJson());
+            sb.Append("\"positions\":").Append(GetPositionsJson()).Append(",");
+            sb.Append("\"strategy_runtime\":").Append(GetStrategyRuntimeJson());
             sb.Append("}");
             return sb.ToString();
+        }
+
+        // Enumerates live strategy instances for read-only status queries
+        // (/runtime_snapshot). Probes several known NT internals via reflection so
+        // the surface adapts across NT8 builds without hard dependencies.
+        // Keys tried, in order:
+        //   1. NinjaTrader.Cbi.DB.dbStrategies  (Dictionary<StrategyBase, Operation>)
+        //   2. Account.All[*].Strategies         (per-account collection)
+        //   3. Globals.AllWindows[*].{ActiveChartControl|ChartControl}.Strategies
+        //      (chart-attached StrategyRenderBase)
+        // Returns { source, total_count, active_count, strategies[], error }.
+        private string GetStrategyRuntimeJson()
+        {
+            var sb = new StringBuilder("{");
+            string source = "";
+            var rows = new List<string>();
+            int total = 0;
+            int active = 0;
+            string err = "";
+
+            string dispErr;
+            bool dispOk = InvokeOnMainThreadWithTimeout(() =>
+            {
+                try
+                {
+                    // 1. DB.dbStrategies — has every registered strategy instance (active or finalized).
+                    // Try several common field/property names so we survive small NT version differences.
+                    try
+                    {
+                        var dbType = Type.GetType("NinjaTrader.Cbi.DB, NinjaTrader.Core");
+                        System.Collections.IDictionary dict = null;
+                        if (dbType != null)
+                        {
+                            foreach (var memberName in new[] { "dbStrategies", "Strategies", "StrategyMap" })
+                            {
+                                var fi = dbType.GetField(memberName,
+                                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                                if (fi != null)
+                                {
+                                    dict = fi.GetValue(null) as System.Collections.IDictionary;
+                                    if (dict != null && dict.Count > 0) break;
+                                }
+                                var pi = dbType.GetProperty(memberName,
+                                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                                if (pi != null)
+                                {
+                                    dict = pi.GetValue(null, null) as System.Collections.IDictionary;
+                                    if (dict != null && dict.Count > 0) break;
+                                }
+                            }
+                        }
+                        if (dict != null && dict.Count > 0)
+                        {
+                            source = "dbStrategies";
+                            foreach (System.Collections.DictionaryEntry kv in dict)
+                            {
+                                var entry = RenderStrategyEntry(kv.Key);
+                                if (entry == null) continue;
+                                rows.Add(entry.Item1);
+                                total++;
+                                if (entry.Item2) active++;
+                            }
+                        }
+                    }
+                    catch (Exception ex1) { err = (err.Length == 0 ? "" : err + "; ") + "db:" + ex1.Message; }
+
+                    // 2. Account.All.Strategies
+                    if (rows.Count == 0)
+                    {
+                        try
+                        {
+                            foreach (var acc in NinjaTrader.Cbi.Account.All)
+                            {
+                                var stratsProp = acc.GetType().GetProperty("Strategies");
+                                if (stratsProp == null) continue;
+                                var strats = stratsProp.GetValue(acc, null) as System.Collections.IEnumerable;
+                                if (strats == null) continue;
+                                foreach (var s in strats)
+                                {
+                                    var entry = RenderStrategyEntry(s);
+                                    if (entry == null) continue;
+                                    rows.Add(entry.Item1);
+                                    total++;
+                                    if (entry.Item2) active++;
+                                }
+                            }
+                            if (rows.Count > 0) source = "account_strategies";
+                        }
+                        catch (Exception ex2) { err = (err.Length == 0 ? "" : err + "; ") + "acc:" + ex2.Message; }
+                    }
+
+                    // 3. Walk chart windows for ChartControl.Strategies
+                    if (rows.Count == 0)
+                    {
+                        try
+                        {
+                            foreach (var w in NinjaTrader.Core.Globals.AllWindows)
+                            {
+                                if (w == null) continue;
+                                var wType = w.GetType();
+                                object cc = null;
+                                var activeProp = wType.GetProperty("ActiveChartControl");
+                                if (activeProp != null) cc = activeProp.GetValue(w, null);
+                                if (cc == null)
+                                {
+                                    var ccProp = wType.GetProperty("ChartControl");
+                                    if (ccProp != null) cc = ccProp.GetValue(w, null);
+                                }
+                                if (cc == null) continue;
+                                var stratsProp = cc.GetType().GetProperty("Strategies");
+                                if (stratsProp == null) continue;
+                                var strats = stratsProp.GetValue(cc, null) as System.Collections.IEnumerable;
+                                if (strats == null) continue;
+                                foreach (var s in strats)
+                                {
+                                    var entry = RenderStrategyEntry(s);
+                                    if (entry == null) continue;
+                                    rows.Add(entry.Item1);
+                                    total++;
+                                    if (entry.Item2) active++;
+                                }
+                            }
+                            if (rows.Count > 0) source = "chart_strategies";
+                        }
+                        catch (Exception ex3) { err = (err.Length == 0 ? "" : err + "; ") + "chart:" + ex3.Message; }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    err = (err.Length == 0 ? "" : err + "; ") + ex.Message;
+                }
+            }, 3000, out dispErr);
+            if (!dispOk) err = (err.Length == 0 ? "dispatch:" : err + "; dispatch:") + dispErr;
+
+            sb.Append("\"source\":\"").Append(JsonEscape(source)).Append("\",");
+            sb.Append("\"total_count\":").Append(total).Append(",");
+            sb.Append("\"active_count\":").Append(active).Append(",");
+            sb.Append("\"strategies\":[");
+            for (int i = 0; i < rows.Count; i++)
+            {
+                if (i > 0) sb.Append(",");
+                sb.Append(rows[i]);
+            }
+            sb.Append("],");
+            sb.Append("\"error\":\"").Append(JsonEscape(err)).Append("\"");
+            sb.Append("}");
+            return sb.ToString();
+        }
+
+        // Extracts a small JSON record for one strategy instance via reflection.
+        // Returns (jsonObject, isActive) or null when the object isn't
+        // strategy-shaped. Designed to not throw — silently skips missing props.
+        private Tuple<string, bool> RenderStrategyEntry(object s)
+        {
+            if (s == null) return null;
+            try
+            {
+                var t = s.GetType();
+                string name = "";
+                try
+                {
+                    var n = t.GetProperty("Name");
+                    if (n != null)
+                    {
+                        var v = n.GetValue(s, null);
+                        if (v != null) name = v.ToString();
+                    }
+                }
+                catch { }
+                if (string.IsNullOrEmpty(name))
+                {
+                    name = t.Name;
+                }
+
+                string stateName = "";
+                try
+                {
+                    var st = t.GetProperty("State");
+                    if (st != null)
+                    {
+                        var v = st.GetValue(s, null);
+                        if (v != null) stateName = v.ToString();
+                    }
+                }
+                catch { }
+
+                bool isEnabled = false;
+                try
+                {
+                    var en = t.GetProperty("IsEnabled");
+                    if (en != null)
+                    {
+                        var v = en.GetValue(s, null);
+                        if (v is bool) isEnabled = (bool)v;
+                    }
+                }
+                catch { }
+                // When IsEnabled isn't present, fall back to treating an Active state as "on".
+                bool isActive = isEnabled || (stateName == "Active" || stateName == "Realtime");
+
+                string account = "";
+                try
+                {
+                    var a = t.GetProperty("Account");
+                    if (a != null)
+                    {
+                        var v = a.GetValue(s, null);
+                        if (v != null)
+                        {
+                            var an = v.GetType().GetProperty("Name");
+                            var av = an == null ? null : an.GetValue(v, null);
+                            account = av == null ? v.ToString() : av.ToString();
+                        }
+                    }
+                }
+                catch { }
+
+                var j = new StringBuilder("{");
+                j.Append("\"name\":\"").Append(JsonEscape(name)).Append("\",");
+                j.Append("\"state\":\"").Append(JsonEscape(stateName)).Append("\",");
+                j.Append("\"is_enabled\":").Append(isActive ? "true" : "false").Append(",");
+                j.Append("\"account\":\"").Append(JsonEscape(account)).Append("\"");
+                j.Append("}");
+                return Tuple.Create(j.ToString(), isActive);
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private string RecoverReconnectJson(bool flattenFirst, HttpListenerRequest request)

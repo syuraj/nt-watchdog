@@ -40,4 +40,8 @@ telegram_enabled: true
 telegram_bot_token: ""
 telegram_chat_id: ""
 telegram_parse_mode: ""
+# User IDs (not chat IDs) allowed to send commands like /status. Leave empty
+# to disable the command bot. Find your ID by messaging @userinfobot on Telegram.
+# Env override: TELEGRAM_ALLOWED_USER_IDS="123456789,987654321"
+telegram_allowed_user_ids: []
 

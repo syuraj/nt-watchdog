@@ -13,6 +13,7 @@ from .config import WatchdogConfig, load_config
 from .nt_process import NTProcessManager
 from .recovery import RecoveryManager
 from .state_store import StateStore
+from .telegram_bot import TelegramBotService, TelegramSharedState
 from .telegram_notifier import TelegramNotifier
 
 
@@ -83,6 +84,16 @@ def run_watchdog(config: WatchdogConfig, max_cycles: int = 0) -> None:
         notifier=notifier,
     )
 
+    telegram_state = TelegramSharedState()
+    telegram_bot = TelegramBotService(config, telegram_state)
+    try:
+        if telegram_bot.start():
+            print(f"[{_now()}] telegram command bot started")
+        elif telegram_bot.last_error:
+            print(f"[{_now()}] telegram command bot not started: {telegram_bot.last_error}")
+    except Exception as exc:
+        print(f"[{_now()}] telegram command bot failed to start: {exc}")
+
     try:
         started = time.time()
         print(f"[{_now()}] watchdog started. bridge={config.bridge_url}")
@@ -150,6 +161,8 @@ def run_watchdog(config: WatchdogConfig, max_cycles: int = 0) -> None:
                 f"nt_connection_ok={nt_connection_ok} nt_connections={conn_connected}/{conn_total} "
                 f"action={result.get('action')} reason={result.get('reason')}{alert_suffix}"
             )
+            # Publish state so Telegram /status handler has fresh data to read.
+            telegram_state.publish(health, runtime_snapshot)
             if max_cycles > 0 and cycle_num >= max_cycles:
                 print(f"[{_now()}] max_cycles reached ({max_cycles}); exiting watchdog loop.")
                 break
@@ -158,6 +171,10 @@ def run_watchdog(config: WatchdogConfig, max_cycles: int = 0) -> None:
                 print(f"[{_now()}] backoff sleep {sleep_sec}s (override)")
             time.sleep(sleep_sec)
     finally:
+        try:
+            telegram_bot.stop()
+        except Exception:
+            pass
         single_lock.release()
 
 

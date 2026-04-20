@@ -35,6 +35,10 @@ class WatchdogConfig:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     telegram_parse_mode: str = ""
+    # Telegram user IDs allowed to send commands to the bot. Leave empty to
+    # disable the command bot even if notifier is enabled. Use user IDs (not
+    # chat IDs) so group-chat members don't inherit access.
+    telegram_allowed_user_ids: List[int] = field(default_factory=list)
 
 
 def _to_bool(value: str, default: bool) -> bool:
@@ -68,6 +72,27 @@ def _to_list(value, default: List[str]) -> List[str]:
     if isinstance(value, str):
         return [part.strip() for part in value.split(",") if part.strip()]
     return list(default)
+
+
+def _to_int_list(value, default: List[int]) -> List[int]:
+    if value is None:
+        return list(default)
+    raw_items: List[str]
+    if isinstance(value, list):
+        raw_items = [str(v).strip() for v in value]
+    elif isinstance(value, str):
+        raw_items = [part.strip() for part in value.split(",")]
+    else:
+        return list(default)
+    out: List[int] = []
+    for item in raw_items:
+        if not item:
+            continue
+        try:
+            out.append(int(item))
+        except ValueError:
+            continue
+    return out
 
 
 def load_config(path: str) -> WatchdogConfig:
@@ -125,9 +150,15 @@ def load_config(path: str) -> WatchdogConfig:
         "connection_names",
         _to_list(os.getenv("WATCHDOG_CONNECTION_NAMES"), cfg.connection_names),
     )
+    _set_if_present(
+        cfg,
+        "telegram_allowed_user_ids",
+        _to_int_list(os.getenv("TELEGRAM_ALLOWED_USER_IDS"), cfg.telegram_allowed_user_ids),
+    )
 
     cfg.bridge_url = cfg.bridge_url.rstrip("/")
     cfg.connection_names = _to_list(cfg.connection_names, [])
+    cfg.telegram_allowed_user_ids = _to_int_list(cfg.telegram_allowed_user_ids, [])
     snapshot_path = Path(cfg.snapshot_path)
     events_log_path = Path(cfg.events_log_path)
     if not snapshot_path.is_absolute():
