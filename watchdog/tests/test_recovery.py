@@ -46,13 +46,19 @@ class FakeProcessManager:
 
 
 class FakeNotifier:
-    def __init__(self) -> None:
+    def __init__(self, send_ok: bool = True) -> None:
         self.events: List[Dict[str, Any]] = []
+        self.send_ok = send_ok
+        self.last_error = ""
 
     def notify_event(self, event_type: str, incident_id: str, details: Dict[str, Any]) -> bool:
         self.events.append(
             {"event_type": event_type, "incident_id": incident_id, "details": details}
         )
+        if not self.send_ok:
+            self.last_error = "simulated telegram failure"
+            return False
+        self.last_error = ""
         return True
 
 
@@ -293,6 +299,127 @@ class RecoveryTests(unittest.TestCase):
 
             self.assertIn("restore", result)
             self.assertFalse(result["restore"]["restored"])
+
+    def test_cooldown_not_started_when_send_fails(self) -> None:
+        """Regression: a failed Telegram send must NOT advance the cooldown
+        timestamp — otherwise retries get skipped while the incident is still
+        undelivered."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            cfg.notification_cooldown_sec = 3600
+            state = StateStore(cfg)
+            bridge = FakeBridge([])
+            process = FakeProcessManager(restart_ok=True)
+            notifier = FakeNotifier(send_ok=False)
+
+            manager = self._make_manager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=notifier,  # type: ignore[arg-type]
+            )
+            r1 = manager._notify("process_started", {"status": "recovering", "reason": "process_not_running"})
+            r2 = manager._notify("process_started", {"status": "recovering", "reason": "process_not_running"})
+
+            self.assertFalse(r1["alert_sent"])
+            self.assertFalse(r2["alert_sent"])
+            # Both attempts actually called the notifier — neither was skipped.
+            self.assertEqual(len(notifier.events), 2)
+            self.assertNotIn("process_not_running", manager.runtime_state.get("notification_state", {}))
+
+    def test_successful_send_starts_cooldown(self) -> None:
+        """After a successful send, the next same-key call within the window
+        must be skipped."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            cfg.notification_cooldown_sec = 3600
+            state = StateStore(cfg)
+            bridge = FakeBridge([])
+            process = FakeProcessManager(restart_ok=True)
+            notifier = FakeNotifier(send_ok=True)
+
+            manager = self._make_manager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=notifier,  # type: ignore[arg-type]
+            )
+            r1 = manager._notify("process_started", {"status": "recovering", "reason": "boot"})
+            r2 = manager._notify("process_started", {"status": "recovering", "reason": "boot"})
+
+            self.assertTrue(r1["alert_sent"])
+            self.assertTrue(r2.get("alert_skipped"))
+            self.assertEqual(len(notifier.events), 1)
+
+    def test_reconnect_retries_share_cooldown_bucket(self) -> None:
+        """Reconnect retries pass attempt_1_failed, attempt_2_failed… as
+        reason. They must share one cooldown bucket via explicit dedupe_key,
+        so repeated retries don't spam Telegram."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            cfg.notification_cooldown_sec = 3600
+            cfg.reconnect_attempt_limit = 10
+            state = StateStore(cfg)
+            bridge = FakeBridge([
+                {"success": False, "error": "e1"},
+                {"success": False, "error": "e2"},
+                {"success": False, "error": "e3"},
+            ])
+            process = FakeProcessManager(restart_ok=True)
+            notifier = FakeNotifier(send_ok=True)
+
+            manager = self._make_manager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=notifier,  # type: ignore[arg-type]
+            )
+            for _ in range(3):
+                manager.handle_cycle(
+                    health={"status": "degraded", "reasons": ["connection_unstable"]},
+                    runtime_snapshot={"positions": []},
+                )
+
+            retry_sends = [e for e in notifier.events if e["event_type"] == "reconnect_retrying"]
+            # Cooldown is 1h so only the first retrying notification should
+            # have gone out; the rest must dedupe under 'reconnect_retrying'.
+            self.assertEqual(len(retry_sends), 1)
+
+    def test_process_started_notification_failure_is_logged(self) -> None:
+        """Regression: when Telegram send fails for the process_started
+        branch, the event log must record sent=False with the error so
+        operators can see it instead of silently dropping."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            state = StateStore(cfg)
+            bridge = FakeBridge([])
+            process = FakeProcessManager(restart_ok=True)
+            notifier = FakeNotifier(send_ok=False)
+
+            manager = self._make_manager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=notifier,  # type: ignore[arg-type]
+            )
+            manager._notify(
+                "process_started",
+                {"status": "recovering", "action": "start_nt", "reason": "process_not_running"},
+                incident_id="abc123",
+            )
+
+            log_lines = Path(cfg.events_log_path).read_text(encoding="utf-8").strip().splitlines()
+            import json as _json
+            notif_events = [
+                _json.loads(l) for l in log_lines if _json.loads(l).get("kind") == "notification"
+            ]
+            self.assertEqual(len(notif_events), 1)
+            self.assertEqual(notif_events[0]["sent"], False)
+            self.assertEqual(notif_events[0]["error"], "simulated telegram failure")
 
 
 if __name__ == "__main__":

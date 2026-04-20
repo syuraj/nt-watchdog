@@ -91,10 +91,18 @@ class RecoveryManager:
         self.runtime_state["awaiting_restore"] = True
         self._persist_runtime()
 
-    def _notify(self, event_type: str, details: Dict[str, Any], incident_id: str = "") -> Dict[str, Any]:
+    def _notify(
+        self,
+        event_type: str,
+        details: Dict[str, Any],
+        incident_id: str = "",
+        dedupe_key: str = "",
+    ) -> Dict[str, Any]:
         resolved_incident_id = incident_id or self._get_incident_id()
-        dedupe_key = str(details.get("reason", "") or event_type)
-        if not self._should_send_notification(dedupe_key):
+        # Callers that want retries to share a cooldown bucket pass an explicit
+        # dedupe_key; otherwise fall back to reason/event_type.
+        resolved_dedupe = dedupe_key or str(details.get("reason", "") or event_type)
+        if self._is_in_cooldown(resolved_dedupe):
             event = {
                 "kind": "notification",
                 "event_type": event_type,
@@ -108,6 +116,11 @@ class RecoveryManager:
 
         sent = self.notifier.notify_event(event_type, resolved_incident_id, details)
         err = str(getattr(self.notifier, "last_error", "") or "")
+        # Only start the cooldown window on a successful send — otherwise a
+        # transient Telegram outage would suppress every retry until the
+        # cooldown expires, masking the incident entirely.
+        if sent:
+            self._record_notification_sent(resolved_dedupe)
         event = {
             "kind": "notification",
             "event_type": event_type,
@@ -119,26 +132,29 @@ class RecoveryManager:
         self.state_store.append_event(event)
         return {"alert_sent": bool(sent), "alert_error": err if not sent else ""}
 
-    def _should_send_notification(self, dedupe_key: str) -> bool:
+    def _is_in_cooldown(self, dedupe_key: str) -> bool:
         cooldown = int(getattr(self.config, "notification_cooldown_sec", 0) or 0)
         if cooldown <= 0:
-            return True
+            return False
+        state = self.runtime_state.get("notification_state", {})
+        if not isinstance(state, dict):
+            return False
+        raw = state.get(dedupe_key)
+        if not isinstance(raw, str):
+            return False
+        try:
+            ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except Exception:
+            return False
+        return (datetime.now(timezone.utc) - ts).total_seconds() < cooldown
+
+    def _record_notification_sent(self, dedupe_key: str) -> None:
         state = self.runtime_state.get("notification_state", {})
         if not isinstance(state, dict):
             state = {}
-        now = datetime.now(timezone.utc)
-        raw = state.get(dedupe_key)
-        if isinstance(raw, str):
-            try:
-                ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-                if (now - ts).total_seconds() < cooldown:
-                    return False
-            except Exception:
-                pass
         state[dedupe_key] = _utc_now()
         self.runtime_state["notification_state"] = state
         self._persist_runtime()
-        return True
 
     def _store_last_good_snapshot(self, runtime_snapshot: Dict[str, Any], health: Dict[str, Any]) -> None:
         if not runtime_snapshot or runtime_snapshot.get("error"):
@@ -438,6 +454,7 @@ class RecoveryManager:
                     "reason": f"attempt_{failures}_failed",
                     "next_retry_sec": sleep_override,
                 },
+                dedupe_key="reconnect_retrying",
             )
             result = {
                 "state": "degraded",

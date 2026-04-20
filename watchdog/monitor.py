@@ -121,10 +121,12 @@ def run_watchdog(config: WatchdogConfig, max_cycles: int = 0) -> None:
             if not process_running and (time.time() - started) > config.startup_grace_sec:
                 if process_manager.start():
                     state_store.append_event({"kind": "process_start", "status": "success", "reason": "process_not_running"})
-                    notifier.notify_event(
+                    # Route through recovery._notify so the event log captures
+                    # alert success + last_error, matching the rest of the flow.
+                    recovery._notify(
                         "process_started",
-                        uuid4().hex[:10],
                         {"status": "recovering", "action": "start_nt", "reason": "process_not_running"},
+                        incident_id=uuid4().hex[:10],
                     )
                     time.sleep(max(5, config.startup_grace_sec))
                     continue
