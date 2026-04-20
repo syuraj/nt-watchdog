@@ -20,7 +20,7 @@ Two parts:
 ## Quick Setup (Python-first)
 1. From repo root, run setup (creates venv, installs deps, copies `HealthBridge.cs` to NT8 AddOns folder):
    - `python scripts/manage_watchdog.py setup`
-   - Defaults: bridge URL `http://localhost:8899`, NT exe path `C:\Program Files\NinjaTrader 8\bin\NinjaTrader.exe`. Override with `--bridge-url <url>` or `--nt-executable-path "C:\Your\Path\NinjaTrader.exe"` (find NT exe via right-click Start Menu shortcut → "Open file location" → Properties → Target).
+   - Optional params to override `--bridge-url http://localhost:8899` or `--nt-executable-path "C:\Your\Path\NinjaTrader.exe"`
 2. In NinjaTrader: NinjaScript → Compile (F5) so `HealthBridge` loads.
 3. Install RDP disconnect handler (elevated shell) — prevents chart freeze on disconnect:
    - `python scripts/manage_watchdog.py install-rdp-handler`
@@ -28,6 +28,7 @@ Two parts:
    ```yaml
    telegram_bot_token: "<token>"
    telegram_chat_id: "<chat_id>"
+   telegram_allowed_user_ids: "<user_ids>"
    ```
 5. Start watchdog:
    - `python scripts/manage_watchdog.py run`

@@ -43,7 +43,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
         // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
         // Format: UTC timestamp at edit time.
-        private const string BuildId = "2026-04-20T05:35:00Z";
+        private const string BuildId = "2026-04-20T06:30:00Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -241,12 +241,6 @@ namespace NinjaTrader.NinjaScript.AddOns
                             break;
                         case "/connections":
                             body = GetConnectionsJson();
-                            break;
-                        case "/instruments_debug":
-                            body = GetInstrumentsDebugJson();
-                            break;
-                        case "/strategies_debug":
-                            body = GetStrategiesDebugJson();
                             break;
                         case "/orders":
                             body = GetOrdersJson();
@@ -737,206 +731,82 @@ namespace NinjaTrader.NinjaScript.AddOns
             return sb.ToString();
         }
 
-        // Scans CC Strategies grid via UI Automation (same source as the enable
-        // command) so the list matches exactly what the user sees — including
-        // disabled rows that drop out of Account.Strategies. Returns
-        // { source, total_count, active_count, strategies[], error }.
+        // Enumerates every live strategy instance via NinjaScript.StrategyBase.All
+        // (public static Collection, count matches the CC grid including disabled
+        // rows). Reads Name + State + IsEnabled from each. Pure reflection; no PS.
         private string GetStrategyRuntimeJson()
         {
-            var sb = new StringBuilder("{");
             int total = 0;
             int active = 0;
             var rows = new List<string>();
             string err = "";
-            try
+            string dispErr;
+            bool dispOk = InvokeOnMainThreadWithTimeout(() =>
             {
-                var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(_PS_SCAN_STRATS_SCRIPT));
-                var psi = new System.Diagnostics.ProcessStartInfo
+                try
                 {
-                    FileName = "powershell",
-                    Arguments = "-NoProfile -WindowStyle Hidden -EncodedCommand " + encoded,
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true,
-                };
-                using (var p = System.Diagnostics.Process.Start(psi))
-                {
-                    if (!p.WaitForExit(15000))
+                    var t = Type.GetType("NinjaTrader.NinjaScript.StrategyBase, NinjaTrader.Core");
+                    if (t == null) { err = "StrategyBase type missing"; return; }
+                    var allProp = t.GetProperty("All",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                    if (allProp == null) { err = "StrategyBase.All missing"; return; }
+                    var coll = allProp.GetValue(null, null) as System.Collections.IEnumerable;
+                    if (coll == null) { err = "StrategyBase.All not enumerable"; return; }
+                    foreach (var s in coll)
                     {
-                        try { p.Kill(); } catch { }
-                        err = "powershell timeout";
-                    }
-                    else
-                    {
-                        string so = p.StandardOutput.ReadToEnd() ?? "";
-                        string se = p.StandardError.ReadToEnd() ?? "";
-                        foreach (var raw in so.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                        if (s == null) continue;
+                        var st = s.GetType();
+                        string name = "";
+                        try { var np = st.GetProperty("Name"); if (np != null) name = (np.GetValue(s, null) ?? "").ToString(); } catch { }
+                        if (string.IsNullOrEmpty(name)) name = st.Name;
+
+                        string stateName = "";
+                        try { var sp = st.GetProperty("State"); if (sp != null) stateName = (sp.GetValue(s, null) ?? "").ToString(); } catch { }
+
+                        bool isEnabled = false;
+                        try { var ep = st.GetProperty("IsEnabled"); if (ep != null) { var ev = ep.GetValue(s, null); if (ev is bool) isEnabled = (bool)ev; } } catch { }
+
+                        string account = "";
+                        try
                         {
-                            // Each line: "NAME|STATE" where STATE is "On" or "Off"
-                            var line = raw.Trim();
-                            int sep = line.IndexOf('|');
-                            if (sep <= 0) continue;
-                            string name = line.Substring(0, sep);
-                            bool isOn = line.Substring(sep + 1) == "On";
-                            total++;
-                            if (isOn) active++;
-                            var j = new StringBuilder("{");
-                            j.Append("\"name\":\"").Append(JsonEscape(name)).Append("\",");
-                            j.Append("\"is_enabled\":").Append(isOn ? "true" : "false");
-                            j.Append("}");
-                            rows.Add(j.ToString());
+                            var ap = st.GetProperty("Account");
+                            var av = ap == null ? null : ap.GetValue(s, null);
+                            if (av != null)
+                            {
+                                var an = av.GetType().GetProperty("Name");
+                                account = an == null ? av.ToString() : ((an.GetValue(av, null) ?? "").ToString());
+                            }
                         }
-                        if (!string.IsNullOrEmpty(se) && !se.TrimStart().StartsWith("#< CLIXML"))
-                            err = se.Trim();
+                        catch { }
+
+                        total++;
+                        if (isEnabled) active++;
+
+                        var j = new StringBuilder("{");
+                        j.Append("\"name\":\"").Append(JsonEscape(name)).Append("\",");
+                        j.Append("\"state\":\"").Append(JsonEscape(stateName)).Append("\",");
+                        j.Append("\"is_enabled\":").Append(isEnabled ? "true" : "false").Append(",");
+                        j.Append("\"account\":\"").Append(JsonEscape(account)).Append("\"");
+                        j.Append("}");
+                        rows.Add(j.ToString());
                     }
                 }
-            }
-            catch (Exception ex) { err = ex.Message; }
+                catch (Exception ex) { err = ex.Message; }
+            }, 2000, out dispErr);
+            if (!dispOk) err = (err.Length == 0 ? "dispatch:" : err + "; dispatch:") + dispErr;
 
-            sb.Append("\"source\":\"uia_scan\",");
+            var sb = new StringBuilder("{");
+            sb.Append("\"source\":\"strategybase_all\",");
             sb.Append("\"total_count\":").Append(total).Append(",");
             sb.Append("\"active_count\":").Append(active).Append(",");
             sb.Append("\"strategies\":[");
-            for (int i = 0; i < rows.Count; i++)
-            {
-                if (i > 0) sb.Append(",");
-                sb.Append(rows[i]);
-            }
+            for (int i = 0; i < rows.Count; i++) { if (i > 0) sb.Append(","); sb.Append(rows[i]); }
             sb.Append("],");
             sb.Append("\"error\":\"").Append(JsonEscape(err)).Append("\"");
             sb.Append("}");
             return sb.ToString();
         }
 
-        // UIA read-only scan of the CC Strategies grid. Produces one line per
-        // row: "<strategy name>|<On|Off>". Walks up to the DataItem ancestor,
-        // then scans its descendant cells for one whose AutomationId is
-        // 'Strategy' (the strategy-name column binding).
-        private const string _PS_SCAN_STRATS_SCRIPT = @"
-Add-Type -AssemblyName UIAutomationClient -ErrorAction SilentlyContinue
-Add-Type -AssemblyName UIAutomationTypes  -ErrorAction SilentlyContinue
-$auto = [System.Windows.Automation.AutomationElement]
-$tree = [System.Windows.Automation.TreeScope]
-$cond = New-Object System.Windows.Automation.PropertyCondition($auto::ClassNameProperty, 'ControlCenter')
-$win = $auto::RootElement.FindFirst($tree::Children, $cond)
-if (-not $win) { exit 2 }
-$cbCond = New-Object System.Windows.Automation.PropertyCondition($auto::ControlTypeProperty, [System.Windows.Automation.ControlType]::CheckBox)
-$cbs = $win.FindAll($tree::Descendants, $cbCond)
-$walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
-for ($i=0; $i -lt $cbs.Count; $i++) {
-    $cb = $cbs.Item($i)
-    if ($cb.Current.AutomationId -ne 'EnableDisableSingleStrategyCommand') { continue }
-    try {
-        $tp = $cb.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
-        $state = 'Off'
-        if ($tp.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On) { $state = 'On' }
-
-        # Find DataItem ancestor (the row).
-        $row = $walker.GetParent($cb)
-        for ($j=0; $j -lt 8 -and $row -ne $null; $j++) {
-            if ($row.Current.ControlType -eq [System.Windows.Automation.ControlType]::DataItem) { break }
-            $row = $walker.GetParent($row)
-        }
-        $rowName = ''
-        if ($row -ne $null) {
-            # CC rows use AutomationId 'RecordRow<n>_Strategy' for the name cell.
-            $all = $row.FindAll($tree::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-            for ($k=0; $k -lt $all.Count; $k++) {
-                $el = $all.Item($k)
-                if ($el.Current.AutomationId -like 'RecordRow*_Strategy') {
-                    $rowName = $el.Current.Name
-                    break
-                }
-            }
-        }
-        if ([string]::IsNullOrEmpty($rowName)) { $rowName = 'unknown' }
-        [Console]::Out.WriteLine($rowName + '|' + $state)
-    } catch { }
-}
-";
-
-        // Extracts a small JSON record for one strategy instance via reflection.
-        // Returns (jsonObject, isActive) or null when the object isn't
-        // strategy-shaped. Designed to not throw — silently skips missing props.
-        private Tuple<string, bool> RenderStrategyEntry(object s)
-        {
-            if (s == null) return null;
-            try
-            {
-                var t = s.GetType();
-                string name = "";
-                try
-                {
-                    var n = t.GetProperty("Name");
-                    if (n != null)
-                    {
-                        var v = n.GetValue(s, null);
-                        if (v != null) name = v.ToString();
-                    }
-                }
-                catch { }
-                if (string.IsNullOrEmpty(name))
-                {
-                    name = t.Name;
-                }
-
-                string stateName = "";
-                try
-                {
-                    var st = t.GetProperty("State");
-                    if (st != null)
-                    {
-                        var v = st.GetValue(s, null);
-                        if (v != null) stateName = v.ToString();
-                    }
-                }
-                catch { }
-
-                bool isEnabled = false;
-                try
-                {
-                    var en = t.GetProperty("IsEnabled");
-                    if (en != null)
-                    {
-                        var v = en.GetValue(s, null);
-                        if (v is bool) isEnabled = (bool)v;
-                    }
-                }
-                catch { }
-                // When IsEnabled isn't present, fall back to treating an Active state as "on".
-                bool isActive = isEnabled || (stateName == "Active" || stateName == "Realtime");
-
-                string account = "";
-                try
-                {
-                    var a = t.GetProperty("Account");
-                    if (a != null)
-                    {
-                        var v = a.GetValue(s, null);
-                        if (v != null)
-                        {
-                            var an = v.GetType().GetProperty("Name");
-                            var av = an == null ? null : an.GetValue(v, null);
-                            account = av == null ? v.ToString() : av.ToString();
-                        }
-                    }
-                }
-                catch { }
-
-                var j = new StringBuilder("{");
-                j.Append("\"name\":\"").Append(JsonEscape(name)).Append("\",");
-                j.Append("\"state\":\"").Append(JsonEscape(stateName)).Append("\",");
-                j.Append("\"is_enabled\":").Append(isActive ? "true" : "false").Append(",");
-                j.Append("\"account\":\"").Append(JsonEscape(account)).Append("\"");
-                j.Append("}");
-                return Tuple.Create(j.ToString(), isActive);
-            }
-            catch
-            {
-                return null;
-            }
-        }
 
         private string RecoverReconnectJson(bool flattenFirst, HttpListenerRequest request)
         {
@@ -2367,466 +2237,6 @@ for ($i=0; $i -lt $cbs.Count; $i++) {
             return sb0.ToString();
         }
 
-        // Recursively walks WPF LogicalTree/VisualTree descendants from root,
-        // collecting hits where the type name contains needle. Records a few
-        // key bindings (DataContext, ItemsSource) so we can see what a grid is
-        // actually bound to.
-        private void WalkWpfTree(object root, string needle, int depth, int maxDepth, List<string> lines)
-        {
-            if (root == null || depth > maxDepth) return;
-            try
-            {
-                var t = root.GetType();
-                if (t.FullName != null && t.FullName.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    lines.Add(new string(' ', depth * 2) + "HIT " + t.FullName);
-                    // Try read DataContext and ItemsSource
-                    try
-                    {
-                        var dcProp = t.GetProperty("DataContext");
-                        var dc = dcProp == null ? null : dcProp.GetValue(root, null);
-                        if (dc != null) lines.Add(new string(' ', depth * 2) + "  DataContext: " + dc.GetType().FullName);
-                    }
-                    catch { }
-                    try
-                    {
-                        var isProp = t.GetProperty("ItemsSource");
-                        var src = isProp == null ? null : isProp.GetValue(root, null);
-                        if (src != null)
-                        {
-                            var st = src.GetType();
-                            int cnt = -1;
-                            if (src is System.Collections.ICollection) cnt = ((System.Collections.ICollection)src).Count;
-                            lines.Add(new string(' ', depth * 2) + "  ItemsSource: " + st.FullName + " count=" + cnt);
-                            if (src is System.Collections.IEnumerable)
-                            {
-                                int i = 0;
-                                foreach (var it in (System.Collections.IEnumerable)src)
-                                {
-                                    if (i++ > 15) { lines.Add(new string(' ', depth * 2) + "  ... truncated"); break; }
-                                    if (it == null) { lines.Add(new string(' ', depth * 2) + "  [" + (i - 1) + "] null"); continue; }
-                                    string rowName = "";
-                                    try { var np = it.GetType().GetProperty("Name"); if (np != null) rowName = (np.GetValue(it, null) as string) ?? ""; }
-                                    catch { }
-                                    string rowEn = "";
-                                    try { var ep = it.GetType().GetProperty("IsEnabled"); var ev = ep == null ? null : ep.GetValue(it, null); if (ev != null) rowEn = ev.ToString(); }
-                                    catch { }
-                                    lines.Add(new string(' ', depth * 2) + "  [" + (i - 1) + "] " + it.GetType().Name + " name='" + rowName + "' IsEnabled=" + rowEn);
-                                }
-                            }
-                        }
-                    }
-                    catch { }
-                }
-            }
-            catch { }
-            // Walk visual tree children via reflection (depends on WPF)
-            try
-            {
-                var vtType = Type.GetType("System.Windows.Media.VisualTreeHelper, PresentationCore");
-                if (vtType == null) return;
-                var countMi = vtType.GetMethod("GetChildrenCount", new[] { typeof(object) });
-                var getMi = vtType.GetMethod("GetChild", new[] { typeof(object), typeof(int) });
-                if (countMi == null || getMi == null) return;
-                int n = 0;
-                try { n = (int)countMi.Invoke(null, new[] { root }); } catch { return; }
-                for (int i = 0; i < n; i++)
-                {
-                    object child = null;
-                    try { child = getMi.Invoke(null, new[] { root, (object)i }); } catch { }
-                    if (child != null) WalkWpfTree(child, needle, depth + 1, maxDepth, lines);
-                }
-            }
-            catch { }
-        }
-
-        // One-shot diagnostic: probes NT assemblies for collections that back
-        // the Control Center Strategies grid (which includes disabled rows NOT
-        // in Account.Strategies). Dumps type + member names + element counts.
-        private string GetStrategiesDebugJson()
-        {
-            var lines = new List<string>();
-            string err;
-            bool ok = InvokeOnMainThreadWithTimeout(() =>
-            {
-                // Walk Globals.AllWindows, find Control Center, descend to the
-                // StrategiesGrid instance, read its ItemsSource (WPF DataContext).
-                try
-                {
-                    foreach (var w in NinjaTrader.Core.Globals.AllWindows)
-                    {
-                        if (w == null) continue;
-                        var tn = w.GetType().FullName ?? "";
-                        if (tn.IndexOf("ControlCenter", StringComparison.OrdinalIgnoreCase) < 0
-                            && tn.IndexOf("MainWindow", StringComparison.OrdinalIgnoreCase) < 0)
-                        {
-                            lines.Add("skip window: " + tn);
-                            continue;
-                        }
-                        lines.Add("FOUND CC-like window: " + tn);
-                        WalkWpfTree(w, "StrategiesGrid", 0, 8, lines);
-                    }
-                }
-                catch (Exception exW) { lines.Add("window walk error: " + exW.Message); }
-
-                var candidates = new[] {
-                    "NinjaTrader.Cbi.DB, NinjaTrader.Core",
-                    "NinjaTrader.Core.Globals, NinjaTrader.Core",
-                    "NinjaTrader.Gui.NinjaScript.StrategiesGrid, NinjaTrader.Gui",
-                    "NinjaTrader.Gui.NinjaScript.StrategyCommands, NinjaTrader.Gui",
-                };
-                foreach (var qn in candidates)
-                {
-                    Type t = Type.GetType(qn);
-                    if (t == null) { lines.Add("MISSING " + qn); continue; }
-                    lines.Add("TYPE " + t.FullName);
-                    var flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
-                    foreach (var f in t.GetFields(flags))
-                    {
-                        var ft = f.FieldType;
-                        var fn = f.Name.ToLowerInvariant();
-                        bool nameHit = fn.Contains("strateg") || fn.Contains("grid") || fn == "all";
-                        bool typeHit = ft.Name.IndexOf("Dictionary", StringComparison.OrdinalIgnoreCase) >= 0
-                            || ft.Name.IndexOf("List", StringComparison.OrdinalIgnoreCase) >= 0
-                            || ft.Name.IndexOf("Collection", StringComparison.OrdinalIgnoreCase) >= 0;
-                        if (!(nameHit || typeHit)) continue;
-                        int cnt = -1;
-                        try
-                        {
-                            var v = f.GetValue(null);
-                            if (v is System.Collections.ICollection) cnt = ((System.Collections.ICollection)v).Count;
-                        }
-                        catch { }
-                        lines.Add("  F " + f.Name + " : " + ft.Name + " count=" + cnt);
-                    }
-                    foreach (var p in t.GetProperties(flags))
-                    {
-                        var pt = p.PropertyType;
-                        var pn = p.Name.ToLowerInvariant();
-                        bool nameHit = pn.Contains("strateg") || pn.Contains("grid") || pn == "all";
-                        bool typeHit = pt.Name.IndexOf("Dictionary", StringComparison.OrdinalIgnoreCase) >= 0
-                            || pt.Name.IndexOf("List", StringComparison.OrdinalIgnoreCase) >= 0
-                            || pt.Name.IndexOf("Collection", StringComparison.OrdinalIgnoreCase) >= 0;
-                        if (!(nameHit || typeHit)) continue;
-                        int cnt = -1;
-                        try
-                        {
-                            var v = p.GetValue(null, null);
-                            if (v is System.Collections.ICollection) cnt = ((System.Collections.ICollection)v).Count;
-                        }
-                        catch { }
-                        lines.Add("  P " + p.Name + " : " + pt.Name + " count=" + cnt);
-                    }
-                }
-            }, 3000, out err);
-
-            var sb = new StringBuilder("{");
-            sb.Append("\"ok\":").Append(ok ? "true" : "false").Append(",");
-            sb.Append("\"error\":\"").Append(JsonEscape(err ?? "")).Append("\",");
-            sb.Append("\"lines\":[");
-            for (int i = 0; i < lines.Count; i++)
-            {
-                if (i > 0) sb.Append(",");
-                sb.Append("\"").Append(JsonEscape(lines[i])).Append("\"");
-            }
-            sb.Append("]}");
-            return sb.ToString();
-        }
-
-        // One-shot diagnostic: probes NT API surfaces for a subscription /
-        // last-tick accessor. Dumps type shapes + any instrument-like entries so
-        // we can identify the field to read for tick freshness detection.
-        private string GetInstrumentsDebugJson()
-        {
-            var probes = new List<string>();
-            var entries = new List<string>();
-            string err;
-            bool ok = InvokeOnMainThreadWithTimeout(() =>
-            {
-                // Look for static "All" style collections on Instrument and MasterInstrument.
-                foreach (var typeName in new[] {
-                    "NinjaTrader.Cbi.Instrument",
-                    "NinjaTrader.Cbi.MasterInstrument",
-                    "NinjaTrader.Data.MarketData",
-                    "NinjaTrader.Cbi.Subscription",
-                })
-                {
-                    var t = Type.GetType(typeName) ?? Type.GetType(typeName + ", NinjaTrader.Core");
-                    if (t == null) { probes.Add(typeName + ":MISSING"); continue; }
-                    probes.Add(typeName + ":FOUND");
-                    foreach (var p in t.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static))
-                    {
-                        var pn = p.Name.ToLowerInvariant();
-                        if (pn == "all" || pn.Contains("subscrib") || pn.Contains("instance") || pn.Contains("active"))
-                            probes.Add(typeName + ".SP:" + p.Name + ":" + p.PropertyType.Name);
-                    }
-                    foreach (var f in t.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static))
-                    {
-                        var fn = f.Name.ToLowerInvariant();
-                        if (fn == "all" || fn.Contains("subscrib") || fn.Contains("instance") || fn.Contains("active"))
-                            probes.Add(typeName + ".SF:" + f.Name + ":" + f.FieldType.Name);
-                    }
-                }
-
-                // Probe Instrument static methods — GetInstrument(string) is the public lookup.
-                try
-                {
-                    var instT2 = Type.GetType("NinjaTrader.Cbi.Instrument, NinjaTrader.Core");
-                    if (instT2 != null)
-                    {
-                        foreach (var m in instT2.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static))
-                        {
-                            var mn = m.Name;
-                            if (mn.StartsWith("Get") || mn.Contains("Find") || mn.Contains("Lookup"))
-                                probes.Add("InstS.M:" + mn + "(" + string.Join(",", Array.ConvertAll(m.GetParameters(), pp => pp.ParameterType.Name)) + ")");
-                        }
-                    }
-                }
-                catch { }
-
-                // Quick lookup: try to fetch "BTCUSD" specifically to see if it returns MarketData.
-                try
-                {
-                    var instT2 = Type.GetType("NinjaTrader.Cbi.Instrument, NinjaTrader.Core");
-                    if (instT2 != null)
-                    {
-                        var getMethod = instT2.GetMethod("GetInstrument", new Type[] { typeof(string), typeof(bool) });
-                        if (getMethod != null)
-                        {
-                            foreach (var sym in new[] { "BTCUSD", "NQ 06-26" })
-                            {
-                                var result = getMethod.Invoke(null, new object[] { sym, false });
-                                if (result == null)
-                                {
-                                    probes.Add("GetInstrument('" + sym + "')=null");
-                                    continue;
-                                }
-                                probes.Add("GetInstrument('" + sym + "')=" + result.GetType().Name);
-                                object md;
-                                if (TryGetPropertyValue(result, "MarketData", out md) && md != null)
-                                {
-                                    object last;
-                                    if (TryGetPropertyValue(md, "Last", out last) && last != null)
-                                    {
-                                        double lp = 0.0;
-                                        DateTime lt = default(DateTime);
-                                        try
-                                        {
-                                            var pp = last.GetType().GetProperty("Price");
-                                            if (pp != null) { var pv = pp.GetValue(last, null); if (pv != null) lp = Convert.ToDouble(pv); }
-                                            var tp = last.GetType().GetProperty("Time");
-                                            if (tp != null) { var tv = tp.GetValue(last, null); if (tv is DateTime) lt = (DateTime)tv; }
-                                        }
-                                        catch { }
-                                        probes.Add(sym + " last=" + lp.ToString("F4") + " time=" + (lt == default(DateTime) ? "default" : lt.ToString("o")));
-                                    }
-                                    else probes.Add(sym + " Last=null");
-                                }
-                                else probes.Add(sym + " MarketData=null");
-                            }
-                        }
-                        else probes.Add("GetInstrument(string) not found");
-                    }
-                }
-                catch (Exception ex) { probes.Add("getInstrument_err:" + ex.Message); }
-
-                // Probe Instrument instance fields/props — the subscription marker is on each Instrument.
-                try
-                {
-                    var instT = Type.GetType("NinjaTrader.Cbi.Instrument, NinjaTrader.Core")
-                        ?? Type.GetType("NinjaTrader.Cbi.Instrument");
-                    if (instT != null)
-                    {
-                        foreach (var p in instT.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly))
-                            probes.Add("Inst.P:" + p.Name + ":" + p.PropertyType.Name);
-                        foreach (var f in instT.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly))
-                            probes.Add("Inst.F:" + f.Name + ":" + f.FieldType.Name);
-                    }
-                }
-                catch { }
-
-                // Walk subscribedThreads — each worker owns a subscribed Instrument with live data.
-                try
-                {
-                    var instT = Type.GetType("NinjaTrader.Cbi.Instrument, NinjaTrader.Core")
-                        ?? Type.GetType("NinjaTrader.Cbi.Instrument");
-                    if (instT != null)
-                    {
-                        var stF = instT.GetField("subscribedThreads",
-                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-                        if (stF != null)
-                        {
-                            var stVal = stF.GetValue(null);
-                            probes.Add("subscribedThreads=" + (stVal == null ? "null" : stVal.GetType().FullName));
-                            var en2 = stVal as System.Collections.IEnumerable;
-                            if (en2 != null)
-                            {
-                                int i = 0;
-                                var nowUtc = DateTime.UtcNow;
-                                foreach (var item in en2)
-                                {
-                                    i++;
-                                    if (item == null) continue;
-                                    var ittype = item.GetType();
-                                    // Dump all members on first item
-                                    if (i == 1)
-                                    {
-                                        foreach (var pp in ittype.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
-                                            probes.Add("st.P:" + pp.Name + ":" + pp.PropertyType.Name);
-                                        foreach (var ff in ittype.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
-                                            probes.Add("st.F:" + ff.Name + ":" + ff.FieldType.Name);
-                                    }
-                                    object instRef = null;
-                                    foreach (var ff in ittype.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance))
-                                    {
-                                        if (ff.FieldType == typeof(WeakReference))
-                                        {
-                                            var wr = ff.GetValue(item) as WeakReference;
-                                            if (wr != null && wr.IsAlive)
-                                            {
-                                                var tgt = wr.Target;
-                                                if (i <= 2 && tgt != null)
-                                                    probes.Add("st[" + i + "].wr_target=" + tgt.GetType().FullName);
-                                                instRef = tgt;
-                                            }
-                                            if (instRef != null) break;
-                                        }
-                                    }
-                                    if (instRef == null) { probes.Add("st[" + i + "]:no_instrument_ref"); continue; }
-                                    string nm = GetAnyStringProperty(instRef, new[] { "FullName", "Name" });
-                                    // Read Last via MarketData.Last (struct)
-                                    double lastPrice = 0.0;
-                                    DateTime lastTime = default(DateTime);
-                                    object md;
-                                    if (TryGetPropertyValue(instRef, "MarketData", out md) && md != null)
-                                    {
-                                        object last;
-                                        if (TryGetPropertyValue(md, "Last", out last) && last != null)
-                                        {
-                                            try
-                                            {
-                                                var pp = last.GetType().GetProperty("Price");
-                                                if (pp != null) { var pv = pp.GetValue(last, null); if (pv != null) lastPrice = Convert.ToDouble(pv); }
-                                                var tp = last.GetType().GetProperty("Time");
-                                                if (tp != null) { var tv = tp.GetValue(last, null); if (tv is DateTime) lastTime = (DateTime)tv; }
-                                            }
-                                            catch { }
-                                        }
-                                    }
-                                    DateTime utcTime = lastTime == default(DateTime) ? default(DateTime) : (lastTime.Kind == DateTimeKind.Utc ? lastTime : lastTime.ToUniversalTime());
-                                    double ageSec = lastTime == default(DateTime) ? -1.0 : (nowUtc - utcTime).TotalSeconds;
-                                    entries.Add("{\"name\":\"" + JsonEscape(nm)
-                                        + "\",\"last_price\":" + lastPrice.ToString("F4")
-                                        + ",\"last_time_utc\":\"" + (lastTime == default(DateTime) ? "" : utcTime.ToString("yyyy-MM-ddTHH:mm:ssZ"))
-                                        + "\",\"age_sec\":" + ageSec.ToString("F1")
-                                        + "}");
-                                }
-                                probes.Add("subscribedThreads count=" + i);
-                            }
-                        }
-                    }
-                }
-                catch (Exception ex) { probes.Add("sub_probe_err:" + ex.Message); }
-
-                // Walk Instrument.All; only emit instruments that actually carry tick data
-                // (MarketData.Last.Price > 0). Report age of last tick in seconds.
-                try
-                {
-                    var instrumentType = Type.GetType("NinjaTrader.Cbi.Instrument, NinjaTrader.Core")
-                        ?? Type.GetType("NinjaTrader.Cbi.Instrument");
-                    if (instrumentType != null)
-                    {
-                        var allProp = instrumentType.GetProperty("All",
-                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-                        var coll = allProp == null ? null : allProp.GetValue(null, null);
-                        var en = coll as System.Collections.IEnumerable;
-                        if (en != null)
-                        {
-                            int total = 0, live = 0;
-                            var nowUtc = DateTime.UtcNow;
-                            foreach (var inst in en)
-                            {
-                                if (inst == null) continue;
-                                total++;
-                                object md;
-                                if (!TryGetPropertyValue(inst, "MarketData", out md) || md == null) continue;
-                                object lastObj;
-                                if (!TryGetPropertyValue(md, "Last", out lastObj) || lastObj == null) continue;
-                                // MarketDataEventArgs.Price (double) + Time (DateTime)
-                                double lastPrice = 0.0;
-                                DateTime lastTime = default(DateTime);
-                                try
-                                {
-                                    var pp = lastObj.GetType().GetProperty("Price");
-                                    if (pp != null)
-                                    {
-                                        var pv = pp.GetValue(lastObj, null);
-                                        if (pv != null) lastPrice = Convert.ToDouble(pv);
-                                    }
-                                    var tp = lastObj.GetType().GetProperty("Time");
-                                    if (tp != null)
-                                    {
-                                        var tv = tp.GetValue(lastObj, null);
-                                        if (tv is DateTime) lastTime = (DateTime)tv;
-                                    }
-                                }
-                                catch { }
-                                // Filter to actually-subscribed instruments. Instrument.MarketDataStub
-                                // is the RealtimeData worker NT attaches when subscription is active.
-                                object stub = null;
-                                var stubField = inst.GetType().GetField("MarketDataStub",
-                                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                                if (stubField != null) stub = stubField.GetValue(inst);
-                                if (stub == null) continue;
-                                live++;
-                                string name = GetAnyStringProperty(inst, new[] { "FullName", "Name" });
-                                DateTime utcTime = lastTime.Kind == DateTimeKind.Utc ? lastTime : lastTime.ToUniversalTime();
-                                double ageSec = lastTime == default(DateTime) ? -1.0 : (nowUtc - utcTime).TotalSeconds;
-                                entries.Add("{\"name\":\"" + JsonEscape(name)
-                                    + "\",\"last_price\":" + lastPrice.ToString("F4")
-                                    + ",\"last_time_utc\":\"" + (lastTime == default(DateTime) ? "" : utcTime.ToString("yyyy-MM-ddTHH:mm:ssZ"))
-                                    + "\",\"age_sec\":" + ageSec.ToString("F1")
-                                    + "}");
-                            }
-                            probes.Add("Instrument.All total=" + total + " live=" + live);
-                        }
-                    }
-                }
-                catch (Exception ex) { probes.Add("walk_err:" + ex.Message); }
-
-                // Dump MarketData declared members so we can see the structure.
-                try
-                {
-                    var md = Type.GetType("NinjaTrader.Data.MarketData, NinjaTrader.Core")
-                        ?? Type.GetType("NinjaTrader.Data.MarketData");
-                    if (md != null)
-                    {
-                        foreach (var p in md.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly))
-                            probes.Add("MD.P:" + p.Name + ":" + p.PropertyType.Name);
-                    }
-                    var mdr = Type.GetType("NinjaTrader.Data.MarketDataEventArgs, NinjaTrader.Core");
-                    if (mdr != null)
-                    {
-                        foreach (var p in mdr.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly))
-                            probes.Add("MDE.P:" + p.Name + ":" + p.PropertyType.Name);
-                    }
-                }
-                catch (Exception ex) { probes.Add("md_probe_err:" + ex.Message); }
-            }, 5000, out err);
-
-            var sb0 = new StringBuilder("{");
-            sb0.Append("\"ok\":").Append(ok ? "true" : "false").Append(",");
-            sb0.Append("\"error\":\"").Append(JsonEscape(err ?? "")).Append("\",");
-            sb0.Append("\"entries\":[").Append(string.Join(",", entries)).Append("],");
-            sb0.Append("\"probes\":[");
-            for (int i = 0; i < probes.Count; i++)
-            {
-                if (i > 0) sb0.Append(",");
-                sb0.Append("\"").Append(JsonEscape(probes[i])).Append("\"");
-            }
-            sb0.Append("]}");
-            return sb0.ToString();
-        }
 
         private string JsonEscape(string s)
         {
