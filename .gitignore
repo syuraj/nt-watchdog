@@ -1,4 +1,5 @@
-config.yaml
+**/config.yaml
+**/config.yaml.bak
 
 **/__pycache__/**
 **/.venv/**
