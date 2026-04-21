@@ -43,7 +43,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
         // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
         // Format: UTC timestamp at edit time.
-        private const string BuildId = "2026-04-20T06:30:00Z";
+        private const string BuildId = "2026-04-21T01:00:00Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -2177,6 +2177,7 @@ for ($i=0; $i -lt $cbs.Count; $i++) {
 }
 [Console]::Out.WriteLine(""toggled="" + $toggled + "" count="" + $strategyCount)
 ";
+
 
         private string EnableAllStrategiesJson()
         {
