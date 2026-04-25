@@ -105,12 +105,10 @@ def format_help() -> str:
 
 def format_restart_result(result: Dict[str, Any]) -> str:
     if result.get("ok"):
-        stop_mode = str(result.get("stop_mode", "") or "")
         toggled = int(result.get("strategies_toggled", 0) or 0)
         bridge_up = bool(result.get("bridge_up"))
-        suffix = "" if stop_mode != "forced" else " (force-killed after soft timeout)"
         bridge_note = "" if bridge_up else " (bridge not yet responsive — strategies enable attempted anyway)"
-        return f"✅ NT restarted ({stop_mode or 'ok'}){suffix}. Strategies enabled: {toggled}{bridge_note}"
+        return f"✅ NT restarted. Strategies enabled: {toggled}{bridge_note}"
     err = str(result.get("error", "") or "unknown_error")
     return f"❌ Restart failed: {err}"
 
@@ -226,7 +224,7 @@ class TelegramBotService:
                 )
                 return
             await update.effective_message.reply_text(
-                "🔧 Restart requested. Gracefully shutting NT — may take up to ~2min…"
+                "🔧 Restart requested. Forcefully shutting NT — may take up to ~2min…"
             )
             try:
                 result = await asyncio.to_thread(self.restart_handler)

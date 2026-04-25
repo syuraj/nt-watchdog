@@ -77,30 +77,21 @@ class FormatHelpTests(unittest.TestCase):
 
 
 class FormatRestartResultTests(unittest.TestCase):
-    def test_success_graceful(self) -> None:
+    def test_success(self) -> None:
         from watchdog.telegram_bot import format_restart_result
 
         out = format_restart_result(
-            {"ok": True, "stop_mode": "graceful", "strategies_toggled": 3, "bridge_up": True}
+            {"ok": True, "strategies_toggled": 3, "bridge_up": True}
         )
         self.assertIn("✅", out)
-        self.assertIn("graceful", out)
         self.assertIn("Strategies enabled: 3", out)
-        self.assertNotIn("force-killed", out)
-
-    def test_success_forced_includes_warning(self) -> None:
-        from watchdog.telegram_bot import format_restart_result
-
-        out = format_restart_result(
-            {"ok": True, "stop_mode": "forced", "strategies_toggled": 0, "bridge_up": True}
-        )
-        self.assertIn("force-killed", out)
+        self.assertNotIn("bridge not yet responsive", out)
 
     def test_success_bridge_not_up_note(self) -> None:
         from watchdog.telegram_bot import format_restart_result
 
         out = format_restart_result(
-            {"ok": True, "stop_mode": "graceful", "strategies_toggled": 0, "bridge_up": False}
+            {"ok": True, "strategies_toggled": 0, "bridge_up": False}
         )
         self.assertIn("bridge not yet responsive", out)
 
