@@ -12,7 +12,7 @@ Two parts:
 - Runs health checks once per minute by default (`poll_interval_sec: 60`) to reduce log noise.
 - Attempts staged recovery (reconnect first, restart fallback with circuit breaker).
 - For `no_connections_detected`, attempts reconnect-only recovery with a dedicated cooldown (`no_connections_recovery_cooldown_sec`) and does not escalate to NT process restart from that reason alone.
-- Supports configured reconnect targets via `connection_names` in `watchdog/config.yaml` (for example `My NinjaTrader`).
+- Supports configured reconnect targets via `connection_names` in `config.yaml` (for example `My NinjaTrader`).
 - Saves last-known-good runtime snapshot for restore workflows.
 - Open-position policy: flatten then recover.
 - Deduplicates repeat incident alerts during cooldown (`notification_cooldown_sec`).
@@ -24,7 +24,7 @@ Two parts:
 2. In NinjaTrader: NinjaScript → Compile (F5) so `HealthBridge` loads.
 3. Install RDP disconnect handler (elevated shell) — prevents chart freeze on disconnect:
    - `python scripts/manage_watchdog.py install-rdp-handler`
-4. (Optional) Configure Telegram alerts — edit `watchdog/config.yaml`:
+4. (Optional) Configure Telegram alerts — edit `config.yaml`:
    ```yaml
    telegram_bot_token: "<token>"
    telegram_chat_id: "<chat_id>"

@@ -1,4 +1,4 @@
-# Copy to watchdog/config.yaml and customize.
+# Copy to config.yaml (repo root) and customize.
 bridge_url: "http://localhost:8899"
 health_endpoint: "/healthz"
 runtime_snapshot_endpoint: "/runtime_snapshot"

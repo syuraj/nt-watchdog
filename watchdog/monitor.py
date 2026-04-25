@@ -188,7 +188,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="NinjaTrader self-healing watchdog")
     parser.add_argument(
         "--config",
-        default="watchdog/config.yaml",
+        default="config.yaml",
         help="Path to watchdog YAML config file.",
     )
     parser.add_argument(

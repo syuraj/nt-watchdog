@@ -37,8 +37,8 @@ python scripts/manage_watchdog.py smoke-test --cleanup
 Direct module run:
 
 ```bash
-python -m watchdog.monitor --config watchdog/config.yaml
-python -m watchdog.monitor --config watchdog/config.yaml --max-cycles 3   # finite for smoke
+python -m watchdog.monitor --config config.yaml
+python -m watchdog.monitor --config config.yaml --max-cycles 3   # finite for smoke
 ```
 
 Startup on login (no admin):

@@ -64,8 +64,8 @@ def setup(args: argparse.Namespace) -> None:
     root = project_root()
     py = ensure_venv(root, args.python)
     req = root / "watchdog" / "requirements.txt"
-    cfg_example = root / "watchdog" / "config.yaml.example"
-    cfg = root / "watchdog" / "config.yaml"
+    cfg_example = root / "config.yaml.example"
+    cfg = root / "config.yaml"
 
     print("Installing dependencies...")
     run([str(py), "-m", "pip", "install", "--upgrade", "pip"])
@@ -98,7 +98,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     root = project_root()
     py = venv_python(root)
     py_exe = str(py if py.exists() else Path(sys.executable))
-    cfg = args.config if args.config else str(root / "watchdog" / "config.yaml")
+    cfg = args.config if args.config else str(root / "config.yaml")
     cmd = [py_exe, "-m", "watchdog.monitor", "--config", cfg]
     if args.max_cycles and args.max_cycles > 0:
         cmd += ["--max-cycles", str(args.max_cycles)]
@@ -193,7 +193,7 @@ def cmd_install_startup(args: argparse.Namespace) -> None:
     if not python_exe.exists():
         python_exe = py if py.exists() else Path(sys.executable)
 
-    config_path = Path(args.config) if args.config else (root / "watchdog" / "config.yaml")
+    config_path = Path(args.config) if args.config else (root / "config.yaml")
     launcher = startup_launcher_path(args.name)
 
     config_str = str(config_path)
@@ -387,7 +387,7 @@ def read_last_event_line(path: Path) -> str:
 
 def cmd_status(args: argparse.Namespace) -> None:
     root = project_root()
-    config_path = Path(args.config) if args.config else (root / "watchdog" / "config.yaml")
+    config_path = Path(args.config) if args.config else (root / "config.yaml")
     bridge_url, events_log = load_status_settings(root, config_path)
 
     bridge_up, bridge_msg, bridge_payload = check_bridge_health(bridge_url)

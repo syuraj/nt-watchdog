@@ -103,10 +103,7 @@ def load_config(path: str) -> WatchdogConfig:
     cfg_path = Path(path)
     if cfg_path.exists():
         cfg_path = cfg_path.resolve()
-        if cfg_path.parent.name.lower() == "watchdog":
-            base_dir = cfg_path.parent.parent
-        else:
-            base_dir = cfg_path.parent
+        base_dir = cfg_path.parent
         try:
             import yaml
         except ImportError as exc:
