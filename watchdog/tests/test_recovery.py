@@ -28,17 +28,45 @@ class FakeBridge:
         self.enable_strategies_calls = getattr(self, "enable_strategies_calls", 0) + 1
         return {"method": "uia_keypress", "toggled": 1, "checkbox_count": 1, "error": ""}
 
+    def disable_all_strategies(self, timeout_sec: int = 15) -> Dict[str, Any]:
+        self.disable_strategies_calls = getattr(self, "disable_strategies_calls", 0) + 1
+        return {"method": "reflection_setstate", "toggled": 1, "count": 1, "error": ""}
+
+
+    def safe_health(self) -> Dict[str, Any]:
+        self.safe_health_calls = getattr(self, "safe_health_calls", 0) + 1
+        return {"status": "ok"}
+
 
 class FakeProcessManager:
-    def __init__(self, restart_ok: bool = True, redirect_ok: bool = False) -> None:
+    def __init__(
+        self,
+        restart_ok: bool = True,
+        redirect_ok: bool = False,
+        manual_ok: bool = True,
+    ) -> None:
         self.restart_ok = restart_ok
         self.restart_calls = 0
         self.redirect_ok = redirect_ok
         self.redirect_calls = 0
+        self.manual_ok = manual_ok
+        self.stop_calls = 0
+        self.start_calls = 0
 
     def restart(self, startup_grace_sec: int) -> bool:
         self.restart_calls += 1
         return self.restart_ok
+
+    def stop(self, timeout_sec: int = 30) -> bool:
+        self.stop_calls += 1
+        return self.manual_ok
+
+    def start(self) -> bool:
+        self.start_calls += 1
+        return self.manual_ok
+
+    def is_running(self) -> bool:
+        return self.manual_ok
 
     def try_redirect_session_to_console(self, timeout_sec: int = 10) -> bool:
         self.redirect_calls += 1
@@ -420,6 +448,83 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(len(notif_events), 1)
             self.assertEqual(notif_events[0]["sent"], False)
             self.assertEqual(notif_events[0]["error"], "simulated telegram failure")
+
+
+class ManualRestartTests(unittest.TestCase):
+    def _build_config(self, temp_dir: str) -> WatchdogConfig:
+        return WatchdogConfig(
+            reconnect_attempt_limit=1,
+            restart_cooldown_sec=1,
+            max_restarts_per_hour=2,
+            no_connections_recovery_cooldown_sec=0,
+            startup_grace_sec=0,
+            snapshot_path=str(Path(temp_dir) / "state" / "snapshot.json"),
+            events_log_path=str(Path(temp_dir) / "logs" / "events.jsonl"),
+            telegram_enabled=False,
+        )
+
+    def test_manual_restart_bypasses_breaker(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            state = StateStore(cfg)
+            bridge = FakeBridge([])
+            process = FakeProcessManager(manual_ok=True)
+            notifier = FakeNotifier()
+
+            # Pre-seed runtime state to exceed breaker threshold.
+            runtime = state.load_runtime_state()
+            now = "2099-01-01T00:00:00Z"
+            runtime["restarts"] = [now, now, now]
+            state.save_runtime_state(runtime)
+
+            manager = RecoveryManager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=notifier,  # type: ignore[arg-type]
+            )
+            manager.post_reconnect_delay_sec = 0
+
+            result = manager.manual_restart(bridge_wait_sec=0)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["stop_mode"], "forced")
+            self.assertEqual(result["strategies_toggled"], 1)
+            self.assertEqual(process.stop_calls, 1)
+            self.assertEqual(process.start_calls, 1)
+            self.assertEqual(process.restart_calls, 0)
+            self.assertEqual(getattr(bridge, "disable_strategies_calls", 0), 1)
+            self.assertEqual(getattr(bridge, "enable_strategies_calls", 0), 1)
+
+            restart_events = [
+                e for e in notifier.events if e["event_type"] == "restart_success"
+            ]
+            self.assertEqual(len(restart_events), 1)
+            self.assertEqual(restart_events[0]["details"].get("reason"), "manual_telegram")
+
+    def test_manual_restart_fails_when_process_does_not_come_up(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            state = StateStore(cfg)
+            bridge = FakeBridge([])
+            process = FakeProcessManager(manual_ok=False)
+            notifier = FakeNotifier()
+
+            manager = RecoveryManager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=notifier,  # type: ignore[arg-type]
+            )
+            manager.post_reconnect_delay_sec = 0
+
+            result = manager.manual_restart(bridge_wait_sec=0)
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"], "process_restart_failed")
+            self.assertEqual(getattr(bridge, "enable_strategies_calls", 0), 0)
 
 
 if __name__ == "__main__":

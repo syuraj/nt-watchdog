@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -35,6 +36,7 @@ class RecoveryManager:
         self.restorer = restorer or StrategyUiRestorer()
         self.runtime_state = self.state_store.load_runtime_state()
         self.post_reconnect_delay_sec = 15
+        self._manual_lock = threading.Lock()
 
     def _persist_runtime(self) -> None:
         self.state_store.save_runtime_state(self.runtime_state)
@@ -515,4 +517,103 @@ class RecoveryManager:
         }
         result.update(notify_meta)
         return result
+
+    def manual_restart(self, bridge_wait_sec: int = 120) -> Dict[str, Any]:
+        """User-initiated restart from Telegram /restart. Bypasses the
+        max_restarts_per_hour breaker (manual intent overrides automation
+        heuristics) but still records a restart timestamp so the automated
+        path sees it afterwards.
+        """
+        if not self._manual_lock.acquire(blocking=False):
+            return {"ok": False, "stop_mode": "", "strategies_toggled": 0, "error": "manual_restart_in_progress"}
+        try:
+            self.runtime_state = self.state_store.load_runtime_state()
+            incident_id = uuid4().hex[:10]
+            reason = "manual_telegram"
+
+            # Pre-stop: disable all strategies via reflection. NT8 pops a
+            # "N strategies running" modal on WM_CLOSE when any are active, which
+            # blocks graceful shutdown. Terminating first lets taskkill proceed
+            # without user interaction.
+            pre_disable = self.bridge.disable_all_strategies()
+            self.state_store.append_event(
+                {
+                    "kind": "strategies_disable",
+                    "toggled": pre_disable.get("toggled", 0),
+                    "count": pre_disable.get("count", 0),
+                    "details": pre_disable,
+                    "trigger": reason,
+                }
+            )
+
+            # Force kill: WM_CLOSE triggers NT's "Save workspace?" modal which
+            # blocks headless shutdown. An earlier reflection-based workspace
+            # save (SaveWorkspaceAs) corrupted the file, so we skip the
+            # graceful path entirely. Strategies already terminated above.
+            if not self.process_manager.stop():
+                ok = False
+            elif not self.process_manager.start():
+                ok = False
+            else:
+                ok = True
+            stop_mode = "forced" if ok else "failed"
+            if not ok:
+                self.state_store.append_event(
+                    {"kind": "restart", "status": "failed", "incident_id": incident_id, "reason": reason, "stop_mode": stop_mode}
+                )
+                self._notify("restart_failed", {"status": "degraded", "action": "manual_restart", "reason": reason, "stop_mode": stop_mode})
+                return {"ok": False, "stop_mode": stop_mode, "strategies_toggled": 0, "error": "process_restart_failed"}
+
+            self.runtime_state["reconnect_failures"] = 0
+            self._mark_restart()
+
+            # Skip the blind startup_grace sleep — poll bridge directly. NT is
+            # ready when /health returns ok; polling 2s beats blind 90s wait.
+            deadline = time.time() + max(0, bridge_wait_sec)
+            bridge_up = False
+            while time.time() < deadline:
+                health = self.bridge.safe_health()
+                if str(health.get("status", "")).lower() == "ok":
+                    bridge_up = True
+                    break
+                time.sleep(2)
+
+            if bridge_up:
+                # Short settle so broker account subscription finishes before
+                # enable_all. Empirically 3s is enough; was 15s.
+                time.sleep(3)
+            strat_result = self.bridge.enable_all_strategies()
+            toggled = int(strat_result.get("toggled", 0) or 0)
+            self.state_store.append_event(
+                {
+                    "kind": "strategies_enable",
+                    "toggled": toggled,
+                    "checkbox_count": strat_result.get("checkbox_count", 0),
+                    "details": strat_result,
+                    "trigger": reason,
+                }
+            )
+            self.state_store.append_event(
+                {
+                    "kind": "restart",
+                    "status": "success",
+                    "incident_id": incident_id,
+                    "reason": reason,
+                    "stop_mode": stop_mode,
+                    "bridge_up": bridge_up,
+                }
+            )
+            self._notify(
+                "restart_success",
+                {"status": "recovering", "action": "manual_restart", "reason": reason, "stop_mode": stop_mode, "strategies_toggled": toggled},
+            )
+            return {
+                "ok": True,
+                "stop_mode": stop_mode,
+                "strategies_toggled": toggled,
+                "bridge_up": bridge_up,
+                "error": "",
+            }
+        finally:
+            self._manual_lock.release()
 

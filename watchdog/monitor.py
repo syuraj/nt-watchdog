@@ -85,7 +85,11 @@ def run_watchdog(config: WatchdogConfig, max_cycles: int = 0) -> None:
     )
 
     telegram_state = TelegramSharedState()
-    telegram_bot = TelegramBotService(config, telegram_state)
+    telegram_bot = TelegramBotService(
+        config,
+        telegram_state,
+        restart_handler=recovery.manual_restart,
+    )
     try:
         if telegram_bot.start():
             print(f"[{_now()}] telegram command bot started")

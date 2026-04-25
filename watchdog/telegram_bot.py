@@ -16,7 +16,7 @@ import asyncio
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .config import WatchdogConfig
 
@@ -97,9 +97,22 @@ def format_status(state: _SharedSnapshot) -> str:
 
 def format_help() -> str:
     return (
-        "/status - NT + strategy status\n"
-        "/help   - this message"
+        "/status  - NT + strategy status\n"
+        "/restart - gracefully restart NT and re-enable all strategies\n"
+        "/help    - this message"
     )
+
+
+def format_restart_result(result: Dict[str, Any]) -> str:
+    if result.get("ok"):
+        stop_mode = str(result.get("stop_mode", "") or "")
+        toggled = int(result.get("strategies_toggled", 0) or 0)
+        bridge_up = bool(result.get("bridge_up"))
+        suffix = "" if stop_mode != "forced" else " (force-killed after soft timeout)"
+        bridge_note = "" if bridge_up else " (bridge not yet responsive — strategies enable attempted anyway)"
+        return f"✅ NT restarted ({stop_mode or 'ok'}){suffix}. Strategies enabled: {toggled}{bridge_note}"
+    err = str(result.get("error", "") or "unknown_error")
+    return f"❌ Restart failed: {err}"
 
 
 class TelegramBotService:
@@ -112,9 +125,15 @@ class TelegramBotService:
         service.stop()    # signals shutdown, joins thread
     """
 
-    def __init__(self, config: WatchdogConfig, shared_state: TelegramSharedState) -> None:
+    def __init__(
+        self,
+        config: WatchdogConfig,
+        shared_state: TelegramSharedState,
+        restart_handler: Optional[Callable[[], Dict[str, Any]]] = None,
+    ) -> None:
         self.config = config
         self.shared_state = shared_state
+        self.restart_handler = restart_handler
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._application = None
@@ -200,6 +219,22 @@ class TelegramBotService:
         async def cmd_help(update, context) -> None:  # type: ignore[no-untyped-def]
             await update.effective_message.reply_text(format_help())
 
+        async def cmd_restart(update, context) -> None:  # type: ignore[no-untyped-def]
+            if self.restart_handler is None:
+                await update.effective_message.reply_text(
+                    "⚠️ /restart not wired (no handler). Check watchdog startup logs."
+                )
+                return
+            await update.effective_message.reply_text(
+                "🔧 Restart requested. Gracefully shutting NT — may take up to ~2min…"
+            )
+            try:
+                result = await asyncio.to_thread(self.restart_handler)
+            except Exception as exc:  # pragma: no cover - defensive
+                await update.effective_message.reply_text(f"❌ Restart failed: {exc!r}")
+                return
+            await update.effective_message.reply_text(format_restart_result(result or {}))
+
         async def cmd_unknown(update, context) -> None:  # type: ignore[no-untyped-def]
             await update.effective_message.reply_text(format_help())
 
@@ -209,6 +244,7 @@ class TelegramBotService:
             .build()
         )
         app.add_handler(CommandHandler("status", cmd_status, filters=user_filter))
+        app.add_handler(CommandHandler("restart", cmd_restart, filters=user_filter))
         app.add_handler(CommandHandler("help", cmd_help, filters=user_filter))
         # Any other text from a whitelisted user (unknown command or plain text)
         # gets /help. Non-whitelisted users are silently dropped by user_filter.

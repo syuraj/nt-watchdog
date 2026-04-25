@@ -53,6 +53,13 @@ class BridgeClient:
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError) as exc:
             return {"method": "uia_keypress", "toggled": 0, "error": str(exc)}
 
+    def disable_all_strategies(self, timeout_sec: int = 15) -> Dict[str, Any]:
+        try:
+            return self.post_json("/strategies/disable_all", body={}, timeout_sec=timeout_sec)
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError) as exc:
+            return {"method": "reflection_setstate", "toggled": 0, "count": 0, "error": str(exc)}
+
+
     def recover_reconnect(self, flatten_first: bool, connection_names: Optional[List[str]] = None) -> Dict[str, Any]:
         endpoint = (
             self.config.flatten_then_reconnect_endpoint

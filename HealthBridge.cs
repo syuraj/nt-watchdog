@@ -29,6 +29,7 @@ namespace NinjaTrader.NinjaScript.AddOns
     ///   POST /recover/reconnect               {"connection_names":[...]}
     ///   POST /recover/flatten_then_reconnect  flatten all positions then reconnect
     ///   POST /strategies/enable_all           SetState(Active) on every non-Active strategy
+    ///   POST /strategies/disable_all          SetState(Terminated) on every live strategy (pre-restart cleanup)
     ///   POST /compile                         {"full":true} for full recompile (reload DLL)
     /// </summary>
     public class HealthBridge : AddOnBase
@@ -43,7 +44,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
         // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
         // Format: UTC timestamp at edit time.
-        private const string BuildId = "2026-04-21T01:00:00Z";
+        private const string BuildId = "2026-04-25T18:30:00Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -224,6 +225,10 @@ namespace NinjaTrader.NinjaScript.AddOns
                 else if (method == "POST" && path == "/strategies/enable_all")
                 {
                     body = EnableAllStrategiesJson();
+                }
+                else if (method == "POST" && path == "/strategies/disable_all")
+                {
+                    body = DisableAllStrategiesJson();
                 }
                 else
                 {
@@ -2238,6 +2243,77 @@ for ($i=0; $i -lt $cbs.Count; $i++) {
             return sb0.ToString();
         }
 
+
+        // Reflection-only: enumerate live StrategyBase.All and call SetState(Terminated)
+        // on each non-Terminated strategy. Returns {toggled, count, error}. Used before
+        // a manual NT restart so the "N strategies running" modal never appears — the
+        // modal blocks WM_CLOSE and forces a hard kill.
+        private string DisableAllStrategiesJson()
+        {
+            int toggled = 0;
+            int count = 0;
+            string err = "";
+            string dispErr;
+            bool dispOk = InvokeOnMainThreadWithTimeout(() =>
+            {
+                try
+                {
+                    var strategyBaseType = Type.GetType("NinjaTrader.NinjaScript.StrategyBase, NinjaTrader.Core");
+                    if (strategyBaseType == null) { err = "StrategyBase type missing"; return; }
+                    var allProp = strategyBaseType.GetProperty("All",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                    if (allProp == null) { err = "StrategyBase.All missing"; return; }
+                    var coll = allProp.GetValue(null, null) as System.Collections.IEnumerable;
+                    if (coll == null) { err = "StrategyBase.All not enumerable"; return; }
+
+                    var stateEnumType = Type.GetType("NinjaTrader.NinjaScript.State, NinjaTrader.Core");
+                    if (stateEnumType == null) { err = "State enum missing"; return; }
+                    object terminatedValue = null;
+                    try { terminatedValue = Enum.Parse(stateEnumType, "Terminated"); }
+                    catch (Exception ex) { err = "State.Terminated parse failed: " + ex.Message; return; }
+
+                    // Snapshot to list — calling SetState mutates the underlying collection.
+                    var items = new List<object>();
+                    foreach (var s in coll) { if (s != null) items.Add(s); }
+
+                    foreach (var s in items)
+                    {
+                        count++;
+                        var st = s.GetType();
+                        string stateName = "";
+                        try { var sp = st.GetProperty("State"); if (sp != null) stateName = (sp.GetValue(s, null) ?? "").ToString(); } catch { }
+                        if (string.Equals(stateName, "Terminated", StringComparison.Ordinal) ||
+                            string.Equals(stateName, "Finalized", StringComparison.Ordinal))
+                            continue;
+
+                        try
+                        {
+                            var setState = st.GetMethod("SetState",
+                                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance,
+                                null, new[] { stateEnumType }, null);
+                            if (setState == null) continue;
+                            setState.Invoke(s, new[] { terminatedValue });
+                            toggled++;
+                        }
+                        catch (Exception ex)
+                        {
+                            if (err.Length == 0) err = "SetState failed: " + ex.Message;
+                        }
+                    }
+                }
+                catch (Exception ex) { err = ex.Message; }
+            }, 8000, out dispErr);
+            if (!dispOk) err = (err.Length == 0 ? "dispatch:" : err + "; dispatch:") + dispErr;
+            Log("disable_all_strategies (reflection) toggled=" + toggled + "/" + count + (string.IsNullOrEmpty(err) ? "" : " err=" + err));
+
+            var sb = new StringBuilder("{");
+            sb.Append("\"method\":\"reflection_setstate\",");
+            sb.Append("\"toggled\":").Append(toggled).Append(",");
+            sb.Append("\"count\":").Append(count).Append(",");
+            sb.Append("\"error\":\"").Append(JsonEscape(err)).Append("\"");
+            sb.Append("}");
+            return sb.ToString();
+        }
 
         private string JsonEscape(string s)
         {
