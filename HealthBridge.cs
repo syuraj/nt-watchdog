@@ -45,7 +45,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
         // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
         // Format: UTC timestamp at edit time.
-        private const string BuildId = "2026-04-25T19:00:00Z";
+        private const string BuildId = "2026-04-25T19:15:00Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -234,10 +234,6 @@ namespace NinjaTrader.NinjaScript.AddOns
                 else if (method == "POST" && path == "/dialogs/dismiss")
                 {
                     body = DismissBlockingDialogsJson();
-                }
-                else if (method == "GET" && path == "/debug/dialogs_reflect")
-                {
-                    body = DebugDialogsReflectJson();
                 }
                 else
                 {
@@ -2319,90 +2315,6 @@ for ($i=0; $i -lt $cbs.Count; $i++) {
             sb.Append("\"method\":\"reflection_setstate\",");
             sb.Append("\"toggled\":").Append(toggled).Append(",");
             sb.Append("\"count\":").Append(count).Append(",");
-            sb.Append("\"error\":\"").Append(JsonEscape(err)).Append("\"");
-            sb.Append("}");
-            return sb.ToString();
-        }
-
-        // Diagnostic dump: for each blocking Window in Globals.AllWindows, list
-        // type, title, and walk the logical tree to find clickable Buttons
-        // (Content/Name/IsDefault/IsCancel). Used once to understand the actual
-        // dialog structure before writing DismissBlockingDialogsJson.
-        private string DebugDialogsReflectJson()
-        {
-            var entries = new List<string>();
-            string err = "";
-            string dispErr;
-            bool dispOk = InvokeOnMainThreadWithTimeout(() =>
-            {
-                try
-                {
-                    foreach (var w in NinjaTrader.Core.Globals.AllWindows)
-                    {
-                        if (w == null) continue;
-                        string typeName = w.GetType().FullName ?? "";
-                        string title = "";
-                        try { title = w.Title ?? ""; } catch { }
-                        string lower = (typeName + " " + title).ToLowerInvariant();
-                        bool isDialog = typeName.IndexOf("Dialog", StringComparison.OrdinalIgnoreCase) >= 0
-                            || typeName.IndexOf("MessageBox", StringComparison.OrdinalIgnoreCase) >= 0
-                            || lower.IndexOf("viewable") >= 0
-                            || lower.IndexOf("outside") >= 0
-                            || lower.IndexOf("warning") >= 0
-                            || lower.IndexOf("confirm") >= 0;
-                        if (!isDialog) continue;
-
-                        var btnList = new List<string>();
-                        var dep = w as System.Windows.DependencyObject;
-                        if (dep != null)
-                        {
-                            var stack = new Stack<System.Windows.DependencyObject>();
-                            stack.Push(dep);
-                            while (stack.Count > 0)
-                            {
-                                var cur = stack.Pop();
-                                var btn = cur as System.Windows.Controls.Button;
-                                if (btn != null)
-                                {
-                                    string content = "";
-                                    try { content = btn.Content == null ? "" : btn.Content.ToString(); } catch { }
-                                    string bn = "";
-                                    try { bn = btn.Name ?? ""; } catch { }
-                                    bool isDefault = false, isCancel = false, isEnabled = false;
-                                    try { isDefault = btn.IsDefault; } catch { }
-                                    try { isCancel = btn.IsCancel; } catch { }
-                                    try { isEnabled = btn.IsEnabled; } catch { }
-                                    btnList.Add("BTN name='" + JsonEscape(bn) + "' content='" + JsonEscape(content) + "' default=" + isDefault + " cancel=" + isCancel + " enabled=" + isEnabled);
-                                }
-                                try
-                                {
-                                    foreach (var c in System.Windows.LogicalTreeHelper.GetChildren(cur))
-                                    {
-                                        var d = c as System.Windows.DependencyObject;
-                                        if (d != null) stack.Push(d);
-                                    }
-                                }
-                                catch { }
-                            }
-                        }
-
-                        var sbEntry = new StringBuilder("{");
-                        sbEntry.Append("\"type\":\"").Append(JsonEscape(typeName)).Append("\",");
-                        sbEntry.Append("\"title\":\"").Append(JsonEscape(title)).Append("\",");
-                        sbEntry.Append("\"buttons\":[");
-                        for (int i = 0; i < btnList.Count; i++) { if (i > 0) sbEntry.Append(","); sbEntry.Append("\"").Append(JsonEscape(btnList[i])).Append("\""); }
-                        sbEntry.Append("]}");
-                        entries.Add(sbEntry.ToString());
-                    }
-                }
-                catch (Exception ex) { err = ex.Message; }
-            }, 3000, out dispErr);
-            if (!dispOk) err = (err.Length == 0 ? "dispatch:" : err + "; dispatch:") + dispErr;
-
-            var sb = new StringBuilder("{");
-            sb.Append("\"dialogs\":[");
-            for (int i = 0; i < entries.Count; i++) { if (i > 0) sb.Append(","); sb.Append(entries[i]); }
-            sb.Append("],");
             sb.Append("\"error\":\"").Append(JsonEscape(err)).Append("\"");
             sb.Append("}");
             return sb.ToString();
