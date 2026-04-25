@@ -32,6 +32,10 @@ class FakeBridge:
         self.disable_strategies_calls = getattr(self, "disable_strategies_calls", 0) + 1
         return {"method": "reflection_setstate", "toggled": 1, "count": 1, "error": ""}
 
+    def dismiss_blocking_dialogs(self, timeout_sec: int = 10) -> Dict[str, Any]:
+        self.dismiss_dialogs_calls = getattr(self, "dismiss_dialogs_calls", 0) + 1
+        return {"dismissed": 0, "clicked": [], "error": ""}
+
 
     def safe_health(self) -> Dict[str, Any]:
         self.safe_health_calls = getattr(self, "safe_health_calls", 0) + 1

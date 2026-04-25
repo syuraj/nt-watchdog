@@ -582,6 +582,19 @@ class RecoveryManager:
                 # Short settle so broker account subscription finishes before
                 # enable_all. Empirically 3s is enough; was 15s.
                 time.sleep(3)
+                # Dismiss benign startup dialogs ("window outside viewable
+                # range", license prompts) that would block subsequent UIA
+                # automation like enable_all.
+                dismiss = self.bridge.dismiss_blocking_dialogs()
+                if dismiss.get("dismissed", 0):
+                    self.state_store.append_event(
+                        {
+                            "kind": "dialogs_dismissed",
+                            "dismissed": dismiss.get("dismissed", 0),
+                            "clicked": dismiss.get("clicked", []),
+                            "trigger": reason,
+                        }
+                    )
             # Retry enable_all up to 3 times if the Strategies grid is empty
             # (UIA can't find checkboxes). NT's Control Center populates the
             # grid lazily after boot; a too-early scan returns checkbox_count=0.
@@ -593,6 +606,8 @@ class RecoveryManager:
                     break
                 if attempt < 2:
                     time.sleep(5)
+                    # Modal may have popped between attempts; try again.
+                    self.bridge.dismiss_blocking_dialogs()
             toggled = int(strat_result.get("toggled", 0) or 0)
             self.state_store.append_event(
                 {

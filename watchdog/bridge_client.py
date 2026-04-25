@@ -59,6 +59,12 @@ class BridgeClient:
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError) as exc:
             return {"method": "reflection_setstate", "toggled": 0, "count": 0, "error": str(exc)}
 
+    def dismiss_blocking_dialogs(self, timeout_sec: int = 10) -> Dict[str, Any]:
+        try:
+            return self.post_json("/dialogs/dismiss", body={}, timeout_sec=timeout_sec)
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError) as exc:
+            return {"dismissed": 0, "clicked": [], "error": str(exc)}
+
 
     def recover_reconnect(self, flatten_first: bool, connection_names: Optional[List[str]] = None) -> Dict[str, Any]:
         endpoint = (
