@@ -582,7 +582,17 @@ class RecoveryManager:
                 # Short settle so broker account subscription finishes before
                 # enable_all. Empirically 3s is enough; was 15s.
                 time.sleep(3)
-            strat_result = self.bridge.enable_all_strategies()
+            # Retry enable_all up to 3 times if the Strategies grid is empty
+            # (UIA can't find checkboxes). NT's Control Center populates the
+            # grid lazily after boot; a too-early scan returns checkbox_count=0.
+            strat_result: Dict[str, Any] = {}
+            for attempt in range(3):
+                strat_result = self.bridge.enable_all_strategies()
+                checkbox_count = int(strat_result.get("checkbox_count", 0) or 0)
+                if checkbox_count > 0:
+                    break
+                if attempt < 2:
+                    time.sleep(5)
             toggled = int(strat_result.get("toggled", 0) or 0)
             self.state_store.append_event(
                 {
