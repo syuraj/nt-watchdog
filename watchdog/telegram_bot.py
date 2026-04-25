@@ -98,7 +98,7 @@ def format_status(state: _SharedSnapshot) -> str:
 def format_help() -> str:
     return (
         "/status  - NT + strategy status\n"
-        "/restart - gracefully restart NT and re-enable all strategies\n"
+        "/restart - restart NT and re-enable all strategies\n"
         "/help    - this message"
     )
 
