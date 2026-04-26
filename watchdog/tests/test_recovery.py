@@ -41,6 +41,10 @@ class FakeBridge:
         self.safe_health_calls = getattr(self, "safe_health_calls", 0) + 1
         return {"status": "ok"}
 
+    def safe_runtime_snapshot(self) -> Dict[str, Any]:
+        self.safe_snap_calls = getattr(self, "safe_snap_calls", 0) + 1
+        return {"strategy_runtime": {"total_count": 1, "active_count": 1, "strategies": []}}
+
 
 class FakeProcessManager:
     def __init__(

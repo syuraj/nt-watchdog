@@ -599,9 +599,12 @@ class RecoveryManager:
                             "trigger": reason,
                         }
                     )
-            # Retry enable_all up to 3 times if the Strategies grid is empty
-            # (UIA can't find checkboxes). NT's Control Center populates the
-            # grid lazily after boot; a too-early scan returns checkbox_count=0.
+            # Retry enable_all up to 3 times. Two failure modes:
+            #   (1) Grid empty (checkbox_count=0) — NT hasn't populated
+            #       Strategies tab yet. Retry after short delay.
+            #   (2) Partial miss — UIA toggled some rows but runtime_snapshot
+            #       still shows active_count<total_count (e.g. virtualized row
+            #       not in tree when scanned, or Space keypress lost). Retry.
             strat_result: Dict[str, Any] = {}
             for attempt in range(3):
                 # Dismiss any dialog that popped after boot (esp. "window
@@ -610,7 +613,13 @@ class RecoveryManager:
                 self.bridge.dismiss_blocking_dialogs()
                 strat_result = self.bridge.enable_all_strategies()
                 checkbox_count = int(strat_result.get("checkbox_count", 0) or 0)
-                if checkbox_count > 0:
+                # Verify via runtime_snapshot — UIA-based toggled count can
+                # miss virtualized rows silently.
+                snap = self.bridge.safe_runtime_snapshot()
+                sr = snap.get("strategy_runtime", {}) if isinstance(snap, dict) else {}
+                total = int(sr.get("total_count", 0) or 0)
+                active = int(sr.get("active_count", 0) or 0)
+                if checkbox_count > 0 and total > 0 and active >= total:
                     break
                 if attempt < 2:
                     time.sleep(5)
