@@ -45,7 +45,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
         // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
         // Format: UTC timestamp at edit time.
-        private const string BuildId = "2026-04-25T20:30:00Z";
+        private const string BuildId = "2026-04-25T21:40:00Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -2159,6 +2159,9 @@ $cbCond = New-Object System.Windows.Automation.PropertyCondition($auto::ControlT
 $cbs = $win.FindAll($tree::Descendants, $cbCond)
 $toggled = 0
 $strategyCount = 0
+# Assumes Control Center Strategies tab is sized tall enough for all rows to
+# be in the WPF visual tree (not virtualized out). If grid is scrollable and
+# only a subset renders, rows outside the viewport are missed.
 for ($i=0; $i -lt $cbs.Count; $i++) {
     $cb = $cbs.Item($i)
     if ($cb.Current.AutomationId -ne 'EnableDisableSingleStrategyCommand') { continue }
