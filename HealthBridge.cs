@@ -45,7 +45,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
         // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
         // Format: UTC timestamp at edit time.
-        private const string BuildId = "2026-04-25T21:40:00Z";
+        private const string BuildId = "2026-04-25T22:00:00Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -2156,38 +2156,70 @@ $win = $auto::RootElement.FindFirst($tree::Children, $cond)
 if (-not $win) { exit 2 }
 
 $cbCond = New-Object System.Windows.Automation.PropertyCondition($auto::ControlTypeProperty, [System.Windows.Automation.ControlType]::CheckBox)
-$cbs = $win.FindAll($tree::Descendants, $cbCond)
-$toggled = 0
-$strategyCount = 0
-# Assumes Control Center Strategies tab is sized tall enough for all rows to
-# be in the WPF visual tree (not virtualized out). If grid is scrollable and
-# only a subset renders, rows outside the viewport are missed.
-for ($i=0; $i -lt $cbs.Count; $i++) {
-    $cb = $cbs.Item($i)
-    if ($cb.Current.AutomationId -ne 'EnableDisableSingleStrategyCommand') { continue }
-    $strategyCount++
+$gridCond = New-Object System.Windows.Automation.PropertyCondition($auto::ControlTypeProperty, [System.Windows.Automation.ControlType]::DataGrid)
+
+# Find scrollable DataGrid (Strategies tab).
+$gridSp = $null
+foreach ($g in $win.FindAll($tree::Descendants, $gridCond)) {
     try {
-        $tp = $cb.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
-        if ($tp.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On) { continue }
-
-        try { $cb.GetCurrentPattern([System.Windows.Automation.ScrollItemPattern]::Pattern).ScrollIntoView() } catch { }
-
-        $attempt = 0
-        while ($attempt -lt 3) {
-            $tp = $cb.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
-            if ($tp.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On) { break }
-            try { $cb.SetFocus() } catch { }
-            Start-Sleep -Milliseconds 150
-            [KbdInput]::PressSpace()
-            Start-Sleep -Seconds (3 + $attempt * 2)
-            $attempt++
-        }
-        $tp = $cb.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
-        if ($tp.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On) {
-            $toggled++
-        }
+        $p = $g.GetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern)
+        if ($p.Current.VerticallyScrollable) { $gridSp = $p; break }
     } catch { }
 }
+
+# WPF DataGrid virtualizes: rows outside viewport aren't in UIA tree. Page
+# through grid, enumerate checkboxes each page, toggle off ones found. Use
+# RuntimeId as dedup key so a row seen twice across pages isn't double-clicked.
+$seen = @{}
+$toggled = 0
+
+function Toggle-Off-Checkboxes {
+    $cbsLocal = $win.FindAll($tree::Descendants, $cbCond)
+    for ($i=0; $i -lt $cbsLocal.Count; $i++) {
+        $cb = $cbsLocal.Item($i)
+        if ($cb.Current.AutomationId -ne 'EnableDisableSingleStrategyCommand') { continue }
+        $rid = ''
+        try { $rid = ($cb.GetRuntimeId() -join '-') } catch { }
+        if ($rid -ne '' -and $seen.ContainsKey($rid)) { continue }
+        $seen[$rid] = $true
+        try {
+            $tp = $cb.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
+            if ($tp.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On) { continue }
+            try { $cb.GetCurrentPattern([System.Windows.Automation.ScrollItemPattern]::Pattern).ScrollIntoView() } catch { }
+            $attempt = 0
+            while ($attempt -lt 3) {
+                $tp = $cb.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
+                if ($tp.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On) { break }
+                try { $cb.SetFocus() } catch { }
+                Start-Sleep -Milliseconds 150
+                [KbdInput]::PressSpace()
+                Start-Sleep -Seconds (2 + $attempt)
+                $attempt++
+            }
+            $tp = $cb.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
+            if ($tp.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On) { $script:toggled++ }
+        } catch { }
+    }
+}
+
+# Scroll to top, process visible, then page down processing each new view.
+if ($gridSp -ne $null) { try { $gridSp.SetScrollPercent(-1, 0); Start-Sleep -Milliseconds 300 } catch { } }
+Toggle-Off-Checkboxes
+if ($gridSp -ne $null) {
+    $lastPct = -1
+    for ($k=0; $k -lt 30; $k++) {
+        try {
+            $gridSp.ScrollVertical([System.Windows.Automation.ScrollAmount]::LargeIncrement)
+            Start-Sleep -Milliseconds 400
+            Toggle-Off-Checkboxes
+            $pct = $gridSp.Current.VerticalScrollPercent
+            if ($pct -ge 99 -or $pct -eq $lastPct) { break }
+            $lastPct = $pct
+        } catch { break }
+    }
+}
+
+$strategyCount = $seen.Count
 [Console]::Out.WriteLine(""toggled="" + $toggled + "" count="" + $strategyCount)
 ";
 
