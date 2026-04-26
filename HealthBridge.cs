@@ -45,7 +45,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
         // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
         // Format: UTC timestamp at edit time.
-        private const string BuildId = "2026-04-25T19:15:00Z";
+        private const string BuildId = "2026-04-25T19:45:00Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -2320,11 +2320,20 @@ for ($i=0; $i -lt $cbs.Count; $i++) {
             return sb.ToString();
         }
 
-        // Dismisses blocking dialogs (MessageBox, ConfirmDialog, "outside
-        // viewable range" warnings) by walking AllWindows, finding Buttons in
-        // the logical tree, and clicking the default/OK button. Pure WPF
-        // reflection — no UIA/PS. Safe: only acts on windows whose type or
-        // title matches a known benign prompt.
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+        private static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+        private const uint WM_CLOSE = 0x0010;
+
+        // Dismisses blocking dialogs on two paths:
+        //   1. WPF Globals.AllWindows — click IsDefault Button via logical tree
+        //   2. Win32 top-level windows (native MessageBox etc.) — PostMessage
+        //      WM_CLOSE. NT shows "window outside viewable range" as a native
+        //      MessageBox that never appears in WPF AllWindows.
+        //
+        // Safelist excludes "strategies" / "workspace" / "save" — destructive
+        // prompt semantics we don't own.
         private string DismissBlockingDialogsJson()
         {
             int dismissed = 0;
@@ -2338,7 +2347,7 @@ for ($i=0; $i -lt $cbs.Count; $i++) {
                     // Tokens that identify dialogs safe to auto-dismiss. Do NOT
                     // add "strategies" / "workspace" / "save" — those are the
                     // destructive prompts we don't own the semantics of.
-                    var safeTokens = new[] { "outside", "viewable", "license", "expire" };
+                    var safeTokens = new[] { "outside", "viewable", "license", "expire", "warning" };
 
                     foreach (var w in NinjaTrader.Core.Globals.AllWindows)
                     {
@@ -2404,6 +2413,60 @@ for ($i=0; $i -lt $cbs.Count; $i++) {
                 catch (Exception ex) { err = ex.Message; }
             }, 3000, out dispErr);
             if (!dispOk) err = (err.Length == 0 ? "dispatch:" : err + "; dispatch:") + dispErr;
+
+            // Win32 sweep: native MessageBox (e.g. "Warning: window outside
+            // viewable range") isn't in WPF AllWindows. Enumerate top-level
+            // windows of this process, match title against safelist, PostMessage
+            // WM_CLOSE. PostMessage (vs SendMessage) so a hung dialog can't
+            // block this thread.
+            try
+            {
+                uint myPid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+                // Same token list as WPF path; tighter here because Win32 titles
+                // are shorter. "Warning" alone matches NT's generic warning
+                // boxes but safelist still excludes workspace/strategies text.
+                var win32SafeTokens = new[] { "warning", "viewable", "outside", "license" };
+                var win32Blocked = new[] { "workspace", "strateg", "save" };
+                var targets = new List<Tuple<IntPtr, string>>();
+                EnumWindows((h, l) =>
+                {
+                    try
+                    {
+                        uint pid;
+                        GetWindowThreadProcessId(h, out pid);
+                        if (pid != myPid) return true;
+                        if (!IsWindowVisible(h)) return true;
+                        var sbt = new System.Text.StringBuilder(256);
+                        GetWindowText(h, sbt, sbt.Capacity);
+                        string t = sbt.ToString();
+                        string tl = t.ToLowerInvariant();
+                        bool safe = false;
+                        foreach (var tok in win32SafeTokens) { if (tl.IndexOf(tok, StringComparison.OrdinalIgnoreCase) >= 0) { safe = true; break; } }
+                        if (!safe) return true;
+                        bool blocked = false;
+                        foreach (var bad in win32Blocked) { if (tl.IndexOf(bad, StringComparison.OrdinalIgnoreCase) >= 0) { blocked = true; break; } }
+                        if (blocked) return true;
+                        targets.Add(Tuple.Create(h, t));
+                    }
+                    catch { }
+                    return true;
+                }, IntPtr.Zero);
+                foreach (var tgt in targets)
+                {
+                    try
+                    {
+                        PostMessage(tgt.Item1, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                        dismissed++;
+                        clicked.Add("win32/" + tgt.Item2);
+                    }
+                    catch (Exception ex)
+                    {
+                        if (err.Length == 0) err = "win32 close failed on '" + tgt.Item2 + "': " + ex.Message;
+                    }
+                }
+            }
+            catch (Exception ex) { if (err.Length == 0) err = "win32 sweep: " + ex.Message; }
+
             Log("dialogs/dismiss dismissed=" + dismissed + (string.IsNullOrEmpty(err) ? "" : " err=" + err));
 
             var sb = new StringBuilder("{");
@@ -2415,6 +2478,17 @@ for ($i=0; $i -lt $cbs.Count; $i++) {
             sb.Append("}");
             return sb.ToString();
         }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+        private static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder lpString, int nMaxCount);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
 
         private string JsonEscape(string s)
         {
