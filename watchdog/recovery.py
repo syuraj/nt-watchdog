@@ -83,14 +83,14 @@ class RecoveryManager:
                 return False
         return True
 
-    def _mark_restart(self) -> None:
+    def _mark_restart(self, awaiting_restore: bool = True) -> None:
         restarts = self.runtime_state.get("restarts", [])
         if not isinstance(restarts, list):
             restarts = []
         restarts = self.state_store.prune_restart_history(restarts)
         restarts.append(_utc_now())
         self.runtime_state["restarts"] = restarts
-        self.runtime_state["awaiting_restore"] = True
+        self.runtime_state["awaiting_restore"] = awaiting_restore
         self._persist_runtime()
 
     def _notify(
@@ -565,7 +565,11 @@ class RecoveryManager:
                 return {"ok": False, "stop_mode": stop_mode, "strategies_toggled": 0, "error": "process_restart_failed"}
 
             self.runtime_state["reconnect_failures"] = 0
-            self._mark_restart()
+            # Manual restart does its own enable_all below, so skip the
+            # awaiting_restore flag — otherwise the next watchdog cycle runs
+            # _attempt_snapshot_restore and may fire a duplicate Telegram
+            # telling the user "Manual enable required".
+            self._mark_restart(awaiting_restore=False)
 
             # Skip the blind startup_grace sleep — poll bridge directly. NT is
             # ready when /health returns ok; polling 2s beats blind 90s wait.
