@@ -604,14 +604,16 @@ class RecoveryManager:
             # grid lazily after boot; a too-early scan returns checkbox_count=0.
             strat_result: Dict[str, Any] = {}
             for attempt in range(3):
+                # Dismiss any dialog that popped after boot (esp. "window
+                # outside viewable range" — NT may show it late). Always call,
+                # cheap no-op when no dialog present.
+                self.bridge.dismiss_blocking_dialogs()
                 strat_result = self.bridge.enable_all_strategies()
                 checkbox_count = int(strat_result.get("checkbox_count", 0) or 0)
                 if checkbox_count > 0:
                     break
                 if attempt < 2:
                     time.sleep(5)
-                    # Modal may have popped between attempts; try again.
-                    self.bridge.dismiss_blocking_dialogs()
             toggled = int(strat_result.get("toggled", 0) or 0)
             self.state_store.append_event(
                 {
