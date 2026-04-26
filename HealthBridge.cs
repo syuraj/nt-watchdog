@@ -45,7 +45,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
         // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
         // Format: UTC timestamp at edit time.
-        private const string BuildId = "2026-04-25T20:00:00Z";
+        private const string BuildId = "2026-04-25T20:30:00Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -234,10 +234,6 @@ namespace NinjaTrader.NinjaScript.AddOns
                 else if (method == "POST" && path == "/dialogs/dismiss")
                 {
                     body = DismissBlockingDialogsJson();
-                }
-                else if (method == "GET" && path == "/debug/all_windows")
-                {
-                    body = DebugAllWindowsJson();
                 }
                 else
                 {
@@ -2492,80 +2488,6 @@ for ($i=0; $i -lt $cbs.Count; $i++) {
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
         private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-
-        [System.Runtime.InteropServices.DllImport("user32.dll")]
-        private static extern IntPtr GetParent(IntPtr hWnd);
-        [System.Runtime.InteropServices.DllImport("user32.dll")]
-        private static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
-        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
-        private static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
-
-        // TEMP diagnostic — dump every window owned by NT process so we can see
-        // what the "outside viewable range" dialog looks like on machines where
-        // /dialogs/dismiss didn't work. Remove once root cause known.
-        private string DebugAllWindowsJson()
-        {
-            var wpfRows = new List<string>();
-            var win32Rows = new List<string>();
-            string err = "";
-            string dispErr;
-            bool dispOk = InvokeOnMainThreadWithTimeout(() =>
-            {
-                try
-                {
-                    foreach (var w in NinjaTrader.Core.Globals.AllWindows)
-                    {
-                        if (w == null) continue;
-                        string typeName = w.GetType().FullName ?? "";
-                        string title = "";
-                        try { title = w.Title ?? ""; } catch { }
-                        bool isVis = false;
-                        try { isVis = w.IsVisible; } catch { }
-                        wpfRows.Add("type='" + JsonEscape(typeName) + "' title='" + JsonEscape(title) + "' visible=" + isVis);
-                    }
-                }
-                catch (Exception ex) { err = ex.Message; }
-            }, 3000, out dispErr);
-            if (!dispOk) err = (err.Length == 0 ? "dispatch:" : err + "; dispatch:") + dispErr;
-
-            try
-            {
-                uint myPid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
-                EnumWindows((h, l) =>
-                {
-                    try
-                    {
-                        uint pid;
-                        GetWindowThreadProcessId(h, out pid);
-                        if (pid != myPid) return true;
-                        bool vis = IsWindowVisible(h);
-                        var sbt = new System.Text.StringBuilder(512);
-                        GetWindowText(h, sbt, sbt.Capacity);
-                        string t = sbt.ToString();
-                        var sbc = new System.Text.StringBuilder(256);
-                        GetClassName(h, sbc, sbc.Capacity);
-                        string cls = sbc.ToString();
-                        IntPtr parent = GetParent(h);
-                        IntPtr owner = GetWindow(h, 4 /* GW_OWNER */);
-                        win32Rows.Add("hwnd=" + h.ToInt64() + " visible=" + vis + " class='" + JsonEscape(cls) + "' title='" + JsonEscape(t) + "' parent=" + parent.ToInt64() + " owner=" + owner.ToInt64());
-                    }
-                    catch { }
-                    return true;
-                }, IntPtr.Zero);
-            }
-            catch (Exception ex) { err = (err.Length == 0 ? "" : err + "; ") + "enumwindows: " + ex.Message; }
-
-            var sb = new StringBuilder("{");
-            sb.Append("\"wpf_windows\":[");
-            for (int i = 0; i < wpfRows.Count; i++) { if (i > 0) sb.Append(","); sb.Append("\"").Append(JsonEscape(wpfRows[i])).Append("\""); }
-            sb.Append("],");
-            sb.Append("\"win32_windows\":[");
-            for (int i = 0; i < win32Rows.Count; i++) { if (i > 0) sb.Append(","); sb.Append("\"").Append(JsonEscape(win32Rows[i])).Append("\""); }
-            sb.Append("],");
-            sb.Append("\"error\":\"").Append(JsonEscape(err)).Append("\"");
-            sb.Append("}");
-            return sb.ToString();
-        }
 
         private string JsonEscape(string s)
         {
