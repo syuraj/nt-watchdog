@@ -98,47 +98,63 @@ class FormatStatusTests(unittest.TestCase):
         self.assertIn("3 trades (2W/1L)", out)
         self.assertIn("ES 06-26 Long 2 @ $5,000.25", out)
 
-    def test_disconnected_account_filtered_out(self) -> None:
+    def test_connected_non_traded_account_filtered_out(self) -> None:
         state = self._publish(
             accounts=[
-                {"name": "Backtest", "connected": False, "cash": 100000.0,
+                {"name": "Idle", "connected": True, "cash": 50000.0,
                  "realized_pnl": 0.0, "unrealized_pnl": 0.0},
-                {"name": "Sim101", "connected": True, "cash": 102545.0,
-                 "realized_pnl": 0.0, "unrealized_pnl": 0.0},
+                {"name": "Active", "connected": True, "cash": 10000.0,
+                 "realized_pnl": 50.0, "unrealized_pnl": 0.0},
             ],
             positions=[],
         )
-        out = format_status(state.snapshot(), [])
-        self.assertNotIn("Backtest", out)
-        self.assertIn("Sim101", out)
-        self.assertIn("Positions: none", out)
+        daily = [
+            {"account": "Idle", "total_pnl": 0.0, "trades": 0, "wins": 0, "losses": 0},
+            {"account": "Active", "total_pnl": 50.0, "trades": 2, "wins": 2, "losses": 0},
+        ]
+        out = format_status(state.snapshot(), daily)
+        self.assertNotIn("Idle", out)
+        self.assertIn("Active", out)
 
-    def test_no_pnl_row_skips_today_line(self) -> None:
+    def test_disconnected_account_filtered_out(self) -> None:
+        state = self._publish(
+            accounts=[
+                {"name": "StaleButTraded", "connected": False, "cash": 100.0,
+                 "realized_pnl": 10.0, "unrealized_pnl": 0.0},
+            ],
+            positions=[],
+        )
+        daily = [{"account": "StaleButTraded", "total_pnl": 10.0, "trades": 1, "wins": 1, "losses": 0}]
+        out = format_status(state.snapshot(), daily)
+        self.assertNotIn("StaleButTraded", out)
+        self.assertIn("No accounts traded today", out)
+
+    def test_no_trades_fallback(self) -> None:
         state = self._publish(
             accounts=[{"name": "Sim101", "connected": True, "cash": 1000.0,
                        "realized_pnl": 0.0, "unrealized_pnl": 0.0}],
             positions=[],
         )
         out = format_status(state.snapshot(), [])
-        self.assertNotIn("Today:", out)
+        self.assertIn("No accounts traded today", out)
 
     def test_empty_snapshot_fallback(self) -> None:
         state = TelegramSharedState()
         out = format_status(state.snapshot(), [])
         self.assertIn("No snapshot yet", out)
 
-    def test_position_for_disconnected_account_hidden(self) -> None:
+    def test_position_for_non_traded_account_hidden(self) -> None:
         state = self._publish(
             accounts=[{"name": "Sim101", "connected": True, "cash": 1000.0,
                        "realized_pnl": 0.0, "unrealized_pnl": 0.0}],
             positions=[
-                {"account": "Stale", "instrument": "NQ", "side": "Short",
+                {"account": "Sim101", "instrument": "NQ", "side": "Short",
                  "quantity": 1, "avg_price": 20000, "unrealized": 0},
             ],
         )
+        # Sim101 did not trade today → position is hidden too.
         out = format_status(state.snapshot(), [])
         self.assertNotIn("NQ", out)
-        self.assertIn("Positions: none", out)
 
 
 class FormatCommandsTests(unittest.TestCase):

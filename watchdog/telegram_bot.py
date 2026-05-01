@@ -104,7 +104,6 @@ def format_status(state: _SharedSnapshot, daily_pnl: List[Dict[str, Any]]) -> st
         return "No snapshot yet — watchdog may still be starting."
 
     accounts = snap.get("accounts") or []
-    connected = [a for a in accounts if a.get("connected")]
     positions = snap.get("positions") or []
 
     pnl_by_account = {
@@ -112,32 +111,38 @@ def format_status(state: _SharedSnapshot, daily_pnl: List[Dict[str, Any]]) -> st
         for row in (daily_pnl or [])
         if isinstance(row, dict)
     }
-    connected_names = {str(a.get("name") or "") for a in connected}
+    traded_names = {
+        name for name, row in pnl_by_account.items()
+        if int(row.get("trades") or 0) > 0
+    }
+    traded = [
+        a for a in accounts
+        if a.get("connected") and str(a.get("name") or "") in traded_names
+    ]
 
     blocks: List[str] = []
-    if not connected:
-        blocks.append("No connected accounts.")
-    for acc in connected:
+    if not traded:
+        blocks.append("No accounts traded today.")
+    for acc in traded:
         name = str(acc.get("name") or "?")
         cash = _fmt_money(acc.get("cash"))
         realized = _fmt_money(acc.get("realized_pnl"))
         unrealized = _fmt_money(acc.get("unrealized_pnl"))
+        row = pnl_by_account.get(name) or {}
+        total = _fmt_money(row.get("total_pnl"))
+        trades = int(row.get("trades") or 0)
+        wins = int(row.get("wins") or 0)
+        losses = int(row.get("losses") or 0)
         acc_lines = [
             f"💰 {name}",
             f"  Cash: {cash}",
             f"  Realized: {realized} · Unrealized: {unrealized}",
+            f"  Today: {total} · {trades} trades ({wins}W/{losses}L)",
         ]
-        row = pnl_by_account.get(name)
-        if row:
-            total = _fmt_money(row.get("total_pnl"))
-            trades = int(row.get("trades") or 0)
-            wins = int(row.get("wins") or 0)
-            losses = int(row.get("losses") or 0)
-            acc_lines.append(f"  Today: {total} · {trades} trades ({wins}W/{losses}L)")
         blocks.append("\n".join(acc_lines))
 
     active_positions = [
-        p for p in positions if str(p.get("account") or "") in connected_names
+        p for p in positions if str(p.get("account") or "") in traded_names
     ]
     if not active_positions:
         blocks.append("📊 Positions: none")
