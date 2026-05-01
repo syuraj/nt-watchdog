@@ -7,7 +7,7 @@ block on bridge HTTP from the async event loop.
 
 Commands:
     /health - summary of NT connection + strategy state
-    /status - account balance + positions + today's P&L
+    /status - account balance + positions
     /restart - restart NT and strategies
 """
 
@@ -169,7 +169,7 @@ def _fmt_money(val: Any) -> str:
 def format_commands() -> str:
     return (
         "/health  - NT + strategy status\n"
-        "/status  - account balance + positions + today's P&L\n"
+        "/status  - account balance + positions\n"
         "/restart - restart NT and all strategies"
     )
 
@@ -331,7 +331,7 @@ class TelegramBotService:
             await app.initialize()
             await app.bot.set_my_commands([
                 BotCommand("health", "NT + strategy status"),
-                BotCommand("status", "Account balance + positions + today's P&L"),
+                BotCommand("status", "Account balance + positions"),
                 BotCommand("restart", "Restart NT and strategies"),
             ])
             await app.start()
