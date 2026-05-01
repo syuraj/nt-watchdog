@@ -114,41 +114,47 @@ def format_status(state: _SharedSnapshot, daily_pnl: List[Dict[str, Any]]) -> st
     }
     connected_names = {str(a.get("name") or "") for a in connected}
 
-    lines: List[str] = []
+    blocks: List[str] = []
     if not connected:
-        lines.append("No connected accounts.")
+        blocks.append("No connected accounts.")
     for acc in connected:
         name = str(acc.get("name") or "?")
         cash = _fmt_money(acc.get("cash"))
         realized = _fmt_money(acc.get("realized_pnl"))
         unrealized = _fmt_money(acc.get("unrealized_pnl"))
-        lines.append(f"💰 {name}: {cash} (realized {realized}, unrealized {unrealized})")
+        acc_lines = [
+            f"💰 {name}",
+            f"  Cash: {cash}",
+            f"  Realized: {realized} · Unrealized: {unrealized}",
+        ]
         row = pnl_by_account.get(name)
         if row:
             total = _fmt_money(row.get("total_pnl"))
             trades = int(row.get("trades") or 0)
             wins = int(row.get("wins") or 0)
             losses = int(row.get("losses") or 0)
-            lines.append(f"  Today: {total} · {trades} trades ({wins}W/{losses}L)")
+            acc_lines.append(f"  Today: {total} · {trades} trades ({wins}W/{losses}L)")
+        blocks.append("\n".join(acc_lines))
 
     active_positions = [
         p for p in positions if str(p.get("account") or "") in connected_names
     ]
     if not active_positions:
-        lines.append("📊 Positions: none")
+        blocks.append("📊 Positions: none")
     else:
-        lines.append("📊 Positions:")
+        pos_lines = ["📊 Positions:"]
         for p in active_positions:
             instr = str(p.get("instrument") or "?")
             side = str(p.get("side") or "?")
             qty = p.get("quantity", "?")
             avg = _fmt_money(p.get("avg_price"))
             unreal = _fmt_money(p.get("unrealized"))
-            lines.append(f"  • {instr} {side} {qty} @ {avg} (unreal {unreal})")
+            pos_lines.append(f"  • {instr} {side} {qty} @ {avg} (unreal {unreal})")
+        blocks.append("\n".join(pos_lines))
 
     if state.last_cycle_utc:
-        lines.append(f"Last cycle: {state.last_cycle_utc}")
-    return "\n".join(lines)
+        blocks.append(f"Last cycle: {state.last_cycle_utc}")
+    return "\n\n".join(blocks)
 
 
 def _fmt_money(val: Any) -> str:
