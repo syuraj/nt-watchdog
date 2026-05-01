@@ -95,14 +95,22 @@ def format_health(state: _SharedSnapshot) -> str:
     return "\n".join(lines)
 
 
-def format_status(state: _SharedSnapshot, daily_pnl: List[Dict[str, Any]]) -> str:
-    """Render /status reply: balance + positions + today's P&L. Pure, unit-testable."""
+def format_status(
+    state: _SharedSnapshot,
+    daily_pnl: List[Dict[str, Any]],
+    positions_override: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Render /status reply: balance + positions + today's P&L. Pure, unit-testable.
+
+    If positions_override is provided, it replaces the cached snapshot's positions
+    (use for live fetches to avoid stale open-position lines after a close).
+    """
     snap = state.runtime_snapshot or {}
     if not snap:
         return "No snapshot yet — watchdog may still be starting."
 
     accounts = snap.get("accounts") or []
-    positions = snap.get("positions") or []
+    positions = positions_override if positions_override is not None else (snap.get("positions") or [])
 
     pnl_by_account: Dict[str, Dict[str, Any]] = {}
     for row in daily_pnl or []:
@@ -141,7 +149,7 @@ def format_status(state: _SharedSnapshot, daily_pnl: List[Dict[str, Any]]) -> st
         acc_lines = [
             f"💰 {name}",
             f"  Cash: {cash}",
-            f"  Today: {total} · {trades} trades ({wins}W/{losses}L)",
+            f"  Today: {total} · {trades} closed ({wins}W/{losses}L)",
         ]
         for p in positions_by_account.get(name, []):
             instr = str(p.get("instrument") or "?")
@@ -289,9 +297,15 @@ class TelegramBotService:
             snap = self.shared_state.snapshot()
             if self.bridge_client is None:
                 daily: List[Dict[str, Any]] = []
+                positions: Optional[List[Dict[str, Any]]] = None
             else:
-                daily = await asyncio.to_thread(self.bridge_client.safe_daily_pnl)
-            await update.effective_message.reply_text(format_status(snap, daily))
+                daily, positions = await asyncio.gather(
+                    asyncio.to_thread(self.bridge_client.safe_daily_pnl),
+                    asyncio.to_thread(self.bridge_client.safe_positions),
+                )
+            await update.effective_message.reply_text(
+                format_status(snap, daily, positions_override=positions)
+            )
 
         async def cmd_restart(update, context) -> None:  # type: ignore[no-untyped-def]
             if self.restart_handler is None:

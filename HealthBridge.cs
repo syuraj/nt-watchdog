@@ -45,7 +45,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
         // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
         // Format: UTC timestamp at edit time.
-        private const string BuildId = "2026-04-25T22:00:00Z";
+        private const string BuildId = "2026-04-30T22:15:00Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -505,7 +505,16 @@ namespace NinjaTrader.NinjaScript.AddOns
                     && !acc.Name.Equals(filterAccount, StringComparison.OrdinalIgnoreCase))
                     continue;
 
+                // Realized P&L sourced from NT's own account ledger — matches the
+                // Accounts grid exactly. Using SystemPerformance.AllTrades for this
+                // under-counted due to fill pairing + session-scoped Executions.
                 double realized = 0;
+                try { realized = acc.Get(AccountItem.RealizedProfitLoss, Currency.UsDollar); }
+                catch { }
+
+                // Trade counts remain best-effort from SystemPerformance (pairs fills
+                // into round-trips). This is informational; the realized number above
+                // is the source of truth.
                 int tradeCount = 0;
                 int wins = 0;
                 int losses = 0;
@@ -519,7 +528,6 @@ namespace NinjaTrader.NinjaScript.AddOns
                 {
                     if (trade.Exit == null) continue;
                     if (trade.Exit.Time.Date != today) continue;
-                    realized += trade.ProfitCurrency;
                     tradeCount++;
                     if (trade.ProfitCurrency > 0) wins++;
                     else if (trade.ProfitCurrency < 0) losses++;
@@ -766,6 +774,11 @@ namespace NinjaTrader.NinjaScript.AddOns
                     {
                         if (s == null) continue;
                         var st = s.GetType();
+                        // Skip ATM strategy instances — NT keeps them in
+                        // StrategyBase.All forever in Finalized state after each
+                        // ATM-template trade, polluting /health with dead rows.
+                        // Real user strategies subclass Strategy, not AtmStrategy.
+                        if (st.Name == "AtmStrategy") continue;
                         string name = "";
                         try { var np = st.GetProperty("Name"); if (np != null) name = (np.GetValue(s, null) ?? "").ToString(); } catch { }
                         if (string.IsNullOrEmpty(name)) name = st.Name;

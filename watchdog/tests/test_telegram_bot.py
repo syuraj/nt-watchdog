@@ -95,7 +95,7 @@ class FormatStatusTests(unittest.TestCase):
         self.assertIn("$49,269.24", out)
         self.assertIn("Today:", out)
         self.assertIn("$114.50", out)
-        self.assertIn("3 trades (2W/1L)", out)
+        self.assertIn("3 closed (2W/1L)", out)
         self.assertIn("ES 06-26 Long 2 @ $5,000.25", out)
         # Realized/Unrealized account-level line removed.
         self.assertNotIn("Realized:", out)
@@ -118,7 +118,33 @@ class FormatStatusTests(unittest.TestCase):
         out = format_status(state.snapshot(), [])
         self.assertIn("Live", out)
         self.assertIn("NQ 06-26 Long 1", out)
-        self.assertIn("0 trades", out)
+        self.assertIn("0 closed", out)
+
+    def test_positions_override_replaces_cached(self) -> None:
+        state = self._publish(
+            accounts=[{"name": "A", "connected": True, "cash": 100.0,
+                       "realized_pnl": 0.0, "unrealized_pnl": 0.0}],
+            positions=[
+                {"account": "A", "instrument": "ES 06-26", "side": "Long",
+                 "quantity": 1, "avg_price": 5000, "unrealized": 10},
+            ],
+        )
+        # Live fetch returns empty → stale ES line must NOT appear.
+        out = format_status(state.snapshot(), [], positions_override=[])
+        self.assertNotIn("ES 06-26", out)
+        self.assertIn("No accounts traded or holding positions today", out)
+
+    def test_positions_override_none_falls_back_to_snapshot(self) -> None:
+        state = self._publish(
+            accounts=[{"name": "A", "connected": True, "cash": 100.0,
+                       "realized_pnl": 0.0, "unrealized_pnl": 0.0}],
+            positions=[
+                {"account": "A", "instrument": "ES 06-26", "side": "Long",
+                 "quantity": 1, "avg_price": 5000, "unrealized": 10},
+            ],
+        )
+        out = format_status(state.snapshot(), [], positions_override=None)
+        self.assertIn("ES 06-26", out)
 
     def test_duplicate_pnl_rows_last_wins(self) -> None:
         state = self._publish(
@@ -132,7 +158,7 @@ class FormatStatusTests(unittest.TestCase):
         ]
         out = format_status(state.snapshot(), daily)
         self.assertIn("$50.00", out)
-        self.assertIn("5 trades", out)
+        self.assertIn("5 closed", out)
         self.assertNotIn("$10.00", out)
 
     def test_connected_non_traded_account_filtered_out(self) -> None:

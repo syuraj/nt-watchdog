@@ -54,6 +54,13 @@ class BridgeClient:
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError):
             return []
 
+    def safe_positions(self, timeout_sec: int = 4) -> List[Dict[str, Any]]:
+        try:
+            resp = self.get_json("/positions", timeout_sec=timeout_sec)
+            return resp if isinstance(resp, list) else []
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError):
+            return []
+
     def enable_all_strategies(self, timeout_sec: int = 15) -> Dict[str, Any]:
         try:
             return self.post_json("/strategies/enable_all", body={}, timeout_sec=timeout_sec)
