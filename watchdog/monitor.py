@@ -167,7 +167,7 @@ def run_watchdog(config: WatchdogConfig, max_cycles: int = 0) -> None:
                 f"nt_connection_ok={nt_connection_ok} nt_connections={conn_connected}/{conn_total} "
                 f"action={result.get('action')} reason={result.get('reason')}{alert_suffix}"
             )
-            # Publish state so Telegram /status handler has fresh data to read.
+            # Publish state so Telegram /health handler has fresh data to read.
             telegram_state.publish(health, runtime_snapshot)
             if max_cycles > 0 and cycle_num >= max_cycles:
                 print(f"[{_now()}] max_cycles reached ({max_cycles}); exiting watchdog loop.")

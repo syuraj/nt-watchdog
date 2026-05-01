@@ -6,7 +6,7 @@ into a thread-safe shared state; bot handlers read that state so they never
 block on bridge HTTP from the async event loop.
 
 Commands:
-    /status - summary of NT connection + strategy state
+    /health - summary of NT connection + strategy state
     /help   - usage
 """
 
@@ -58,8 +58,8 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def format_status(state: _SharedSnapshot) -> str:
-    """Render /status reply from a shared-state snapshot. Pure, unit-testable."""
+def format_health(state: _SharedSnapshot) -> str:
+    """Render /health reply from a shared-state snapshot. Pure, unit-testable."""
     health = state.health or {}
     snap = state.runtime_snapshot or {}
 
@@ -97,7 +97,7 @@ def format_status(state: _SharedSnapshot) -> str:
 
 def format_help() -> str:
     return (
-        "/status  - NT + strategy status\n"
+        "/health  - NT + strategy status\n"
         "/restart - restart NT and all strategies\n"
         "/help    - this message"
     )
@@ -200,7 +200,7 @@ class TelegramBotService:
 
     async def _run_async(self) -> None:
         # Import PTB lazily so watchdog can still run if the dep is missing.
-        from telegram import Update
+        from telegram import BotCommand, Update
         from telegram.ext import (
             Application,
             CommandHandler,
@@ -210,9 +210,9 @@ class TelegramBotService:
 
         user_filter = filters.User(user_id=self.config.telegram_allowed_user_ids)
 
-        async def cmd_status(update, context) -> None:  # type: ignore[no-untyped-def]
+        async def cmd_health(update, context) -> None:  # type: ignore[no-untyped-def]
             snap = self.shared_state.snapshot()
-            await update.effective_message.reply_text(format_status(snap))
+            await update.effective_message.reply_text(format_health(snap))
 
         async def cmd_help(update, context) -> None:  # type: ignore[no-untyped-def]
             await update.effective_message.reply_text(format_help())
@@ -241,7 +241,7 @@ class TelegramBotService:
             .token(self.config.telegram_bot_token)
             .build()
         )
-        app.add_handler(CommandHandler("status", cmd_status, filters=user_filter))
+        app.add_handler(CommandHandler("health", cmd_health, filters=user_filter))
         app.add_handler(CommandHandler("restart", cmd_restart, filters=user_filter))
         app.add_handler(CommandHandler("help", cmd_help, filters=user_filter))
         # Any other text from a whitelisted user (unknown command or plain text)
@@ -251,6 +251,11 @@ class TelegramBotService:
         self._application = app
         try:
             await app.initialize()
+            await app.bot.set_my_commands([
+                BotCommand("health", "NT + strategy status"),
+                BotCommand("restart", "Restart NT and strategies"),
+                BotCommand("help", "Show commands"),
+            ])
             await app.start()
             await app.updater.start_polling(
                 drop_pending_updates=True,

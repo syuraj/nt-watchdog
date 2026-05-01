@@ -8,11 +8,11 @@ from watchdog.telegram_bot import (
     TelegramBotService,
     TelegramSharedState,
     format_help,
-    format_status,
+    format_health,
 )
 
 
-class FormatStatusTests(unittest.TestCase):
+class FormatHealthTests(unittest.TestCase):
     def test_connected_with_active_strategies(self) -> None:
         state = TelegramSharedState()
         state.publish(
@@ -26,7 +26,7 @@ class FormatStatusTests(unittest.TestCase):
                 }
             },
         )
-        out = format_status(state.snapshot())
+        out = format_health(state.snapshot())
         self.assertIn("🟢", out)
         self.assertIn("NT connections: 1/1", out)
         self.assertIn("Strategies: 2 active / 2 total", out)
@@ -40,7 +40,7 @@ class FormatStatusTests(unittest.TestCase):
             {"status": "degraded", "connections": {"total": 1, "connected": 0}, "reasons": ["no_connections_detected"]},
             {"strategy_runtime": {"strategies": []}},
         )
-        out = format_status(state.snapshot())
+        out = format_health(state.snapshot())
         self.assertIn("🔴", out)
         self.assertIn("Strategies: 0 active / 0 total", out)
         self.assertIn("Reasons: no_connections_detected", out)
@@ -57,13 +57,13 @@ class FormatStatusTests(unittest.TestCase):
                 }
             },
         )
-        out = format_status(state.snapshot())
+        out = format_health(state.snapshot())
         self.assertIn("S1 (off/Finalized)", out)
 
     def test_missing_fields_render_safely(self) -> None:
         state = TelegramSharedState()
         # No publish call — snapshot is empty dicts.
-        out = format_status(state.snapshot())
+        out = format_health(state.snapshot())
         self.assertIn("Health: unknown", out)
         self.assertIn("NT connections: ?/?", out)
 
@@ -71,7 +71,7 @@ class FormatStatusTests(unittest.TestCase):
 class FormatHelpTests(unittest.TestCase):
     def test_contains_all_commands(self) -> None:
         out = format_help()
-        self.assertIn("/status", out)
+        self.assertIn("/health", out)
         self.assertIn("/restart", out)
         self.assertIn("/help", out)
 
