@@ -92,8 +92,6 @@ def format_health(state: _SharedSnapshot) -> str:
     reasons = health.get("reasons") or []
     if isinstance(reasons, list) and reasons:
         lines.append(f"Reasons: {', '.join(str(r) for r in reasons)}")
-    if state.last_cycle_utc:
-        lines.append(f"Last cycle: {state.last_cycle_utc}")
     return "\n".join(lines)
 
 
@@ -106,28 +104,35 @@ def format_status(state: _SharedSnapshot, daily_pnl: List[Dict[str, Any]]) -> st
     accounts = snap.get("accounts") or []
     positions = snap.get("positions") or []
 
-    pnl_by_account = {
-        str(row.get("account") or ""): row
-        for row in (daily_pnl or [])
-        if isinstance(row, dict)
-    }
-    traded_names = {
-        name for name, row in pnl_by_account.items()
-        if int(row.get("trades") or 0) > 0
-    }
-    traded = [
+    pnl_by_account: Dict[str, Dict[str, Any]] = {}
+    for row in daily_pnl or []:
+        if not isinstance(row, dict):
+            continue
+        pnl_by_account[str(row.get("account") or "")] = row  # last wins on dupes
+
+    positions_by_account: Dict[str, List[Dict[str, Any]]] = {}
+    for p in positions:
+        if not isinstance(p, dict):
+            continue
+        positions_by_account.setdefault(str(p.get("account") or ""), []).append(p)
+
+    def _is_active(name: str) -> bool:
+        row = pnl_by_account.get(name) or {}
+        if int(row.get("trades") or 0) > 0:
+            return True
+        return bool(positions_by_account.get(name))
+
+    active = [
         a for a in accounts
-        if a.get("connected") and str(a.get("name") or "") in traded_names
+        if a.get("connected") and _is_active(str(a.get("name") or ""))
     ]
 
     blocks: List[str] = []
-    if not traded:
-        blocks.append("No accounts traded today.")
-    for acc in traded:
+    if not active:
+        blocks.append("No accounts traded or holding positions today.")
+    for acc in active:
         name = str(acc.get("name") or "?")
         cash = _fmt_money(acc.get("cash"))
-        realized = _fmt_money(acc.get("realized_pnl"))
-        unrealized = _fmt_money(acc.get("unrealized_pnl"))
         row = pnl_by_account.get(name) or {}
         total = _fmt_money(row.get("total_pnl"))
         trades = int(row.get("trades") or 0)
@@ -136,29 +141,17 @@ def format_status(state: _SharedSnapshot, daily_pnl: List[Dict[str, Any]]) -> st
         acc_lines = [
             f"💰 {name}",
             f"  Cash: {cash}",
-            f"  Realized: {realized} · Unrealized: {unrealized}",
             f"  Today: {total} · {trades} trades ({wins}W/{losses}L)",
         ]
-        blocks.append("\n".join(acc_lines))
-
-    active_positions = [
-        p for p in positions if str(p.get("account") or "") in traded_names
-    ]
-    if not active_positions:
-        blocks.append("📊 Positions: none")
-    else:
-        pos_lines = ["📊 Positions:"]
-        for p in active_positions:
+        for p in positions_by_account.get(name, []):
             instr = str(p.get("instrument") or "?")
             side = str(p.get("side") or "?")
             qty = p.get("quantity", "?")
             avg = _fmt_money(p.get("avg_price"))
             unreal = _fmt_money(p.get("unrealized"))
-            pos_lines.append(f"  • {instr} {side} {qty} @ {avg} (unreal {unreal})")
-        blocks.append("\n".join(pos_lines))
+            acc_lines.append(f"  • {instr} {side} {qty} @ {avg} (unreal {unreal})")
+        blocks.append("\n".join(acc_lines))
 
-    if state.last_cycle_utc:
-        blocks.append(f"Last cycle: {state.last_cycle_utc}")
     return "\n\n".join(blocks)
 
 

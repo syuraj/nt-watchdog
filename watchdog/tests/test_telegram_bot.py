@@ -97,6 +97,43 @@ class FormatStatusTests(unittest.TestCase):
         self.assertIn("$114.50", out)
         self.assertIn("3 trades (2W/1L)", out)
         self.assertIn("ES 06-26 Long 2 @ $5,000.25", out)
+        # Realized/Unrealized account-level line removed.
+        self.assertNotIn("Realized:", out)
+        self.assertNotIn("Unrealized:", out)
+        # No separate Positions section.
+        self.assertNotIn("📊", out)
+
+    def test_open_position_without_closed_trade_shows_account(self) -> None:
+        state = self._publish(
+            accounts=[
+                {"name": "Live", "connected": True, "cash": 25000.0,
+                 "realized_pnl": 0.0, "unrealized_pnl": 10.0},
+            ],
+            positions=[
+                {"account": "Live", "instrument": "NQ 06-26", "side": "Long",
+                 "quantity": 1, "avg_price": 20000.0, "unrealized": 10.0},
+            ],
+        )
+        # trades=0 but a position is open → account must still show.
+        out = format_status(state.snapshot(), [])
+        self.assertIn("Live", out)
+        self.assertIn("NQ 06-26 Long 1", out)
+        self.assertIn("0 trades", out)
+
+    def test_duplicate_pnl_rows_last_wins(self) -> None:
+        state = self._publish(
+            accounts=[{"name": "A", "connected": True, "cash": 100.0,
+                       "realized_pnl": 0.0, "unrealized_pnl": 0.0}],
+            positions=[],
+        )
+        daily = [
+            {"account": "A", "total_pnl": 10.0, "trades": 1, "wins": 1, "losses": 0},
+            {"account": "A", "total_pnl": 50.0, "trades": 5, "wins": 3, "losses": 2},
+        ]
+        out = format_status(state.snapshot(), daily)
+        self.assertIn("$50.00", out)
+        self.assertIn("5 trades", out)
+        self.assertNotIn("$10.00", out)
 
     def test_connected_non_traded_account_filtered_out(self) -> None:
         state = self._publish(
@@ -127,7 +164,7 @@ class FormatStatusTests(unittest.TestCase):
         daily = [{"account": "StaleButTraded", "total_pnl": 10.0, "trades": 1, "wins": 1, "losses": 0}]
         out = format_status(state.snapshot(), daily)
         self.assertNotIn("StaleButTraded", out)
-        self.assertIn("No accounts traded today", out)
+        self.assertIn("No accounts traded or holding positions today", out)
 
     def test_no_trades_fallback(self) -> None:
         state = self._publish(
@@ -136,25 +173,25 @@ class FormatStatusTests(unittest.TestCase):
             positions=[],
         )
         out = format_status(state.snapshot(), [])
-        self.assertIn("No accounts traded today", out)
+        self.assertIn("No accounts traded or holding positions today", out)
 
     def test_empty_snapshot_fallback(self) -> None:
         state = TelegramSharedState()
         out = format_status(state.snapshot(), [])
         self.assertIn("No snapshot yet", out)
 
-    def test_position_for_non_traded_account_hidden(self) -> None:
+    def test_position_for_disconnected_account_hidden(self) -> None:
         state = self._publish(
-            accounts=[{"name": "Sim101", "connected": True, "cash": 1000.0,
+            accounts=[{"name": "Stale", "connected": False, "cash": 1000.0,
                        "realized_pnl": 0.0, "unrealized_pnl": 0.0}],
             positions=[
-                {"account": "Sim101", "instrument": "NQ", "side": "Short",
+                {"account": "Stale", "instrument": "NQ", "side": "Short",
                  "quantity": 1, "avg_price": 20000, "unrealized": 0},
             ],
         )
-        # Sim101 did not trade today → position is hidden too.
         out = format_status(state.snapshot(), [])
         self.assertNotIn("NQ", out)
+        self.assertNotIn("Stale", out)
 
 
 class FormatCommandsTests(unittest.TestCase):
