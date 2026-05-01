@@ -7,7 +7,8 @@ block on bridge HTTP from the async event loop.
 
 Commands:
     /health - summary of NT connection + strategy state
-    /help   - usage
+    /status - account balance + positions + today's P&L
+    /restart - restart NT and strategies
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
+from .bridge_client import BridgeClient
 from .config import WatchdogConfig
 
 
@@ -95,11 +97,74 @@ def format_health(state: _SharedSnapshot) -> str:
     return "\n".join(lines)
 
 
-def format_help() -> str:
+def format_status(state: _SharedSnapshot, daily_pnl: List[Dict[str, Any]]) -> str:
+    """Render /status reply: balance + positions + today's P&L. Pure, unit-testable."""
+    snap = state.runtime_snapshot or {}
+    if not snap:
+        return "No snapshot yet — watchdog may still be starting."
+
+    accounts = snap.get("accounts") or []
+    connected = [a for a in accounts if a.get("connected")]
+    positions = snap.get("positions") or []
+
+    pnl_by_account = {
+        str(row.get("account") or ""): row
+        for row in (daily_pnl or [])
+        if isinstance(row, dict)
+    }
+    connected_names = {str(a.get("name") or "") for a in connected}
+
+    lines: List[str] = []
+    if not connected:
+        lines.append("No connected accounts.")
+    for acc in connected:
+        name = str(acc.get("name") or "?")
+        cash = _fmt_money(acc.get("cash"))
+        realized = _fmt_money(acc.get("realized_pnl"))
+        unrealized = _fmt_money(acc.get("unrealized_pnl"))
+        lines.append(f"💰 {name}: {cash} (realized {realized}, unrealized {unrealized})")
+        row = pnl_by_account.get(name)
+        if row:
+            total = _fmt_money(row.get("total_pnl"))
+            trades = int(row.get("trades") or 0)
+            wins = int(row.get("wins") or 0)
+            losses = int(row.get("losses") or 0)
+            lines.append(f"  Today: {total} · {trades} trades ({wins}W/{losses}L)")
+
+    active_positions = [
+        p for p in positions if str(p.get("account") or "") in connected_names
+    ]
+    if not active_positions:
+        lines.append("📊 Positions: none")
+    else:
+        lines.append("📊 Positions:")
+        for p in active_positions:
+            instr = str(p.get("instrument") or "?")
+            side = str(p.get("side") or "?")
+            qty = p.get("quantity", "?")
+            avg = _fmt_money(p.get("avg_price"))
+            unreal = _fmt_money(p.get("unrealized"))
+            lines.append(f"  • {instr} {side} {qty} @ {avg} (unreal {unreal})")
+
+    if state.last_cycle_utc:
+        lines.append(f"Last cycle: {state.last_cycle_utc}")
+    return "\n".join(lines)
+
+
+def _fmt_money(val: Any) -> str:
+    try:
+        n = float(val)
+    except (TypeError, ValueError):
+        return "$?"
+    sign = "-" if n < 0 else ""
+    return f"{sign}${abs(n):,.2f}"
+
+
+def format_commands() -> str:
     return (
         "/health  - NT + strategy status\n"
-        "/restart - restart NT and all strategies\n"
-        "/help    - this message"
+        "/status  - account balance + positions + today's P&L\n"
+        "/restart - restart NT and all strategies"
     )
 
 
@@ -128,10 +193,12 @@ class TelegramBotService:
         config: WatchdogConfig,
         shared_state: TelegramSharedState,
         restart_handler: Optional[Callable[[], Dict[str, Any]]] = None,
+        bridge_client: Optional[BridgeClient] = None,
     ) -> None:
         self.config = config
         self.shared_state = shared_state
         self.restart_handler = restart_handler
+        self.bridge_client = bridge_client
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._application = None
@@ -214,8 +281,13 @@ class TelegramBotService:
             snap = self.shared_state.snapshot()
             await update.effective_message.reply_text(format_health(snap))
 
-        async def cmd_help(update, context) -> None:  # type: ignore[no-untyped-def]
-            await update.effective_message.reply_text(format_help())
+        async def cmd_status(update, context) -> None:  # type: ignore[no-untyped-def]
+            snap = self.shared_state.snapshot()
+            if self.bridge_client is None:
+                daily: List[Dict[str, Any]] = []
+            else:
+                daily = await asyncio.to_thread(self.bridge_client.safe_daily_pnl)
+            await update.effective_message.reply_text(format_status(snap, daily))
 
         async def cmd_restart(update, context) -> None:  # type: ignore[no-untyped-def]
             if self.restart_handler is None:
@@ -234,7 +306,7 @@ class TelegramBotService:
             await update.effective_message.reply_text(format_restart_result(result or {}))
 
         async def cmd_unknown(update, context) -> None:  # type: ignore[no-untyped-def]
-            await update.effective_message.reply_text(format_help())
+            await update.effective_message.reply_text(format_commands())
 
         app = (
             Application.builder()
@@ -242,8 +314,8 @@ class TelegramBotService:
             .build()
         )
         app.add_handler(CommandHandler("health", cmd_health, filters=user_filter))
+        app.add_handler(CommandHandler("status", cmd_status, filters=user_filter))
         app.add_handler(CommandHandler("restart", cmd_restart, filters=user_filter))
-        app.add_handler(CommandHandler("help", cmd_help, filters=user_filter))
         # Any other text from a whitelisted user (unknown command or plain text)
         # gets /help. Non-whitelisted users are silently dropped by user_filter.
         app.add_handler(MessageHandler(user_filter & filters.TEXT, cmd_unknown))
@@ -253,8 +325,8 @@ class TelegramBotService:
             await app.initialize()
             await app.bot.set_my_commands([
                 BotCommand("health", "NT + strategy status"),
+                BotCommand("status", "Account balance + positions + today's P&L"),
                 BotCommand("restart", "Restart NT and strategies"),
-                BotCommand("help", "Show commands"),
             ])
             await app.start()
             await app.updater.start_polling(

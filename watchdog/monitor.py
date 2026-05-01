@@ -89,6 +89,7 @@ def run_watchdog(config: WatchdogConfig, max_cycles: int = 0) -> None:
         config,
         telegram_state,
         restart_handler=recovery.manual_restart,
+        bridge_client=bridge,
     )
     try:
         if telegram_bot.start():

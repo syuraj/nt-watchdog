@@ -7,8 +7,9 @@ from watchdog.config import WatchdogConfig
 from watchdog.telegram_bot import (
     TelegramBotService,
     TelegramSharedState,
-    format_help,
+    format_commands,
     format_health,
+    format_status,
 )
 
 
@@ -68,12 +69,85 @@ class FormatHealthTests(unittest.TestCase):
         self.assertIn("NT connections: ?/?", out)
 
 
-class FormatHelpTests(unittest.TestCase):
+class FormatStatusTests(unittest.TestCase):
+    def _publish(self, accounts, positions) -> TelegramSharedState:
+        state = TelegramSharedState()
+        state.publish(
+            {"status": "ok"},
+            {"accounts": accounts, "positions": positions, "strategy_runtime": {"strategies": []}},
+        )
+        return state
+
+    def test_connected_account_with_position_and_pnl(self) -> None:
+        state = self._publish(
+            accounts=[
+                {"name": "DEMO", "connected": True, "cash": 49269.24,
+                 "realized_pnl": 120.0, "unrealized_pnl": -5.5, "buying_power": 0.0},
+            ],
+            positions=[
+                {"account": "DEMO", "instrument": "ES 06-26", "side": "Long",
+                 "quantity": 2, "avg_price": 5000.25, "unrealized": -5.5},
+            ],
+        )
+        daily = [{"account": "DEMO", "total_pnl": 114.5, "trades": 3, "wins": 2, "losses": 1}]
+        out = format_status(state.snapshot(), daily)
+        self.assertIn("DEMO", out)
+        self.assertIn("$49,269.24", out)
+        self.assertIn("Today:", out)
+        self.assertIn("$114.50", out)
+        self.assertIn("3 trades (2W/1L)", out)
+        self.assertIn("ES 06-26 Long 2 @ $5,000.25", out)
+
+    def test_disconnected_account_filtered_out(self) -> None:
+        state = self._publish(
+            accounts=[
+                {"name": "Backtest", "connected": False, "cash": 100000.0,
+                 "realized_pnl": 0.0, "unrealized_pnl": 0.0},
+                {"name": "Sim101", "connected": True, "cash": 102545.0,
+                 "realized_pnl": 0.0, "unrealized_pnl": 0.0},
+            ],
+            positions=[],
+        )
+        out = format_status(state.snapshot(), [])
+        self.assertNotIn("Backtest", out)
+        self.assertIn("Sim101", out)
+        self.assertIn("Positions: none", out)
+
+    def test_no_pnl_row_skips_today_line(self) -> None:
+        state = self._publish(
+            accounts=[{"name": "Sim101", "connected": True, "cash": 1000.0,
+                       "realized_pnl": 0.0, "unrealized_pnl": 0.0}],
+            positions=[],
+        )
+        out = format_status(state.snapshot(), [])
+        self.assertNotIn("Today:", out)
+
+    def test_empty_snapshot_fallback(self) -> None:
+        state = TelegramSharedState()
+        out = format_status(state.snapshot(), [])
+        self.assertIn("No snapshot yet", out)
+
+    def test_position_for_disconnected_account_hidden(self) -> None:
+        state = self._publish(
+            accounts=[{"name": "Sim101", "connected": True, "cash": 1000.0,
+                       "realized_pnl": 0.0, "unrealized_pnl": 0.0}],
+            positions=[
+                {"account": "Stale", "instrument": "NQ", "side": "Short",
+                 "quantity": 1, "avg_price": 20000, "unrealized": 0},
+            ],
+        )
+        out = format_status(state.snapshot(), [])
+        self.assertNotIn("NQ", out)
+        self.assertIn("Positions: none", out)
+
+
+class FormatCommandsTests(unittest.TestCase):
     def test_contains_all_commands(self) -> None:
-        out = format_help()
+        out = format_commands()
         self.assertIn("/health", out)
+        self.assertIn("/status", out)
         self.assertIn("/restart", out)
-        self.assertIn("/help", out)
+        self.assertNotIn("/help", out)
 
 
 class FormatRestartResultTests(unittest.TestCase):

@@ -47,6 +47,13 @@ class BridgeClient:
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError) as exc:
             return {"error": str(exc)}
 
+    def safe_daily_pnl(self, timeout_sec: int = 6) -> List[Dict[str, Any]]:
+        try:
+            resp = self.get_json("/daily_pnl", timeout_sec=timeout_sec)
+            return resp if isinstance(resp, list) else []
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError):
+            return []
+
     def enable_all_strategies(self, timeout_sec: int = 15) -> Dict[str, Any]:
         try:
             return self.post_json("/strategies/enable_all", body={}, timeout_sec=timeout_sec)
