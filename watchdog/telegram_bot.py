@@ -157,7 +157,7 @@ def format_status(
             qty = p.get("quantity", "?")
             avg = _fmt_money(p.get("avg_price"))
             unreal = _fmt_money(p.get("unrealized"))
-            acc_lines.append(f"  • {instr} {side} {qty} @ {avg} (unreal {unreal})")
+            acc_lines.append(f"  🟢 {instr} {side} {qty} @ {avg} (unreal {unreal})")
         blocks.append("\n".join(acc_lines))
 
     return "\n\n".join(blocks)
