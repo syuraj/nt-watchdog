@@ -25,7 +25,7 @@ namespace NinjaTrader.NinjaScript.AddOns
     ///
     /// Endpoints:
     ///   GET  /health, /healthz, /runtime_snapshot
-    ///   GET  /accounts, /positions, /connections, /orders, /trades, /daily_pnl
+    ///   GET  /accounts, /positions, /connections, /orders, /trades
     ///   POST /recover/reconnect               {"connection_names":[...]}
     ///   POST /recover/flatten_then_reconnect  flatten all positions then reconnect
     ///   POST /strategies/enable_all           SetState(Active) on every non-Active strategy
@@ -45,7 +45,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
         // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
         // Format: UTC timestamp at edit time.
-        private const string BuildId = "2026-05-09T02:27:04Z";
+        private const string BuildId = "2026-05-09T03:35:30Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -257,9 +257,6 @@ namespace NinjaTrader.NinjaScript.AddOns
                             break;
                         case "/trades":
                             body = GetTradesJson(ctx.Request.QueryString);
-                            break;
-                        case "/daily_pnl":
-                            body = GetDailyPnlJson(ctx.Request.QueryString);
                             break;
                         default:
                             status = 404;
@@ -490,101 +487,6 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
             sb.Append("]");
             return sb.ToString();
-        }
-
-        private string GetDailyPnlJson(System.Collections.Specialized.NameValueCollection qs)
-        {
-            string filterAccount = qs["account"];
-            DateTime dayStartLocal = DateTime.Today;
-            DateTime dayEndLocal = dayStartLocal.AddDays(1);
-            string localTimeZone = TimeZoneInfo.Local.Id;
-
-            var sb = new StringBuilder("[");
-            bool first = true;
-            foreach (var acc in Account.All)
-            {
-                if (!string.IsNullOrEmpty(filterAccount)
-                    && !acc.Name.Equals(filterAccount, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                // Realized P&L sourced from NT's own account ledger — matches the
-                // Accounts grid exactly. Using SystemPerformance.AllTrades for this
-                // under-counted due to fill pairing + session-scoped Executions.
-                double realized = 0;
-                try { realized = acc.Get(AccountItem.RealizedProfitLoss, Currency.UsDollar); }
-                catch { }
-
-                // Trade counts remain best-effort from SystemPerformance (pairs fills
-                // into round-trips). This is informational; the realized number above
-                // is the source of truth.
-                int tradeCount = 0;
-                int wins = 0;
-                int losses = 0;
-                int executionCount = 0;
-
-                SystemPerformance perf2;
-                try { perf2 = SystemPerformance.Calculate(acc.Executions); }
-                catch { perf2 = null; }
-
-                if (perf2 != null)
-                foreach (var trade in perf2.AllTrades)
-                {
-                    if (trade.Exit == null) continue;
-                    DateTime exitLocal = ToLocalCalendarTime(trade.Exit.Time);
-                    if (exitLocal < dayStartLocal || exitLocal >= dayEndLocal) continue;
-                    tradeCount++;
-                    if (trade.ProfitCurrency > 0) wins++;
-                    else if (trade.ProfitCurrency < 0) losses++;
-                }
-
-                try
-                {
-                    foreach (var exec in acc.Executions)
-                    {
-                        if (exec == null) continue;
-                        DateTime execLocal = ToLocalCalendarTime(exec.Time);
-                        if (execLocal >= dayStartLocal && execLocal < dayEndLocal)
-                            executionCount++;
-                    }
-                }
-                catch { }
-
-                double unrealized = 0;
-                try { unrealized = acc.Get(AccountItem.UnrealizedProfitLoss, Currency.UsDollar); }
-                catch { }
-
-                bool hasActivityToday = tradeCount > 0
-                    || executionCount > 0
-                    || Math.Abs(realized) >= 0.005
-                    || Math.Abs(unrealized) >= 0.005;
-
-                if (!first) sb.Append(",");
-                sb.Append("{");
-                sb.Append("\"account\":\"").Append(JsonEscape(acc.Name)).Append("\",");
-                sb.Append("\"date\":\"").Append(dayStartLocal.ToString("yyyy-MM-dd")).Append("\",");
-                sb.Append("\"day_start_local\":\"").Append(dayStartLocal.ToString("yyyy-MM-ddTHH:mm:ss")).Append("\",");
-                sb.Append("\"day_end_local\":\"").Append(dayEndLocal.ToString("yyyy-MM-ddTHH:mm:ss")).Append("\",");
-                sb.Append("\"timezone\":\"").Append(JsonEscape(localTimeZone)).Append("\",");
-                sb.Append("\"realized_pnl\":").Append(realized.ToString("F2")).Append(",");
-                sb.Append("\"unrealized_pnl\":").Append(unrealized.ToString("F2")).Append(",");
-                sb.Append("\"total_pnl\":").Append((realized + unrealized).ToString("F2")).Append(",");
-                sb.Append("\"trades\":").Append(tradeCount).Append(",");
-                sb.Append("\"executions\":").Append(executionCount).Append(",");
-                sb.Append("\"has_activity_today\":").Append(hasActivityToday ? "true" : "false").Append(",");
-                sb.Append("\"wins\":").Append(wins).Append(",");
-                sb.Append("\"losses\":").Append(losses);
-                sb.Append("}");
-                first = false;
-            }
-            sb.Append("]");
-            return sb.ToString();
-        }
-
-        private DateTime ToLocalCalendarTime(DateTime value)
-        {
-            if (value.Kind == DateTimeKind.Utc)
-                return value.ToLocalTime();
-            return value;
         }
 
         private string GetHealthzJson()

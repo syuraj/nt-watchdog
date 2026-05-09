@@ -203,19 +203,9 @@ def _estimate_sqlite_realized_pnl(exec_rows: List[Any], start_ticks: int) -> Dic
     }
 
 
-def merge_daily_activity(
-    daily_pnl: List[Dict[str, Any]],
-    sqlite_activity: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """Build daily rows from SQLite activity, with optional legacy bridge fallback."""
+def merge_daily_activity(sqlite_activity: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Build daily rows from SQLite activity."""
     merged: Dict[str, Dict[str, Any]] = {}
-    for row in daily_pnl or []:
-        if not isinstance(row, dict):
-            continue
-        name = str(row.get("account") or "")
-        if name:
-            merged[name] = dict(row)
-
     for row in sqlite_activity or []:
         if not isinstance(row, dict):
             continue
@@ -233,18 +223,11 @@ def merge_daily_activity(
             },
         )
         try:
-            existing_executions = int(target.get("executions") or 0)
-        except (TypeError, ValueError):
-            existing_executions = 0
-        try:
             fallback_executions = int(row.get("executions") or 0)
         except (TypeError, ValueError):
             fallback_executions = 0
-        if existing_executions <= 0 and fallback_executions > 0:
+        if fallback_executions > 0:
             target["executions"] = fallback_executions
-            target["has_activity_today"] = True
-            target["activity_source"] = row.get("activity_source") or "sqlite"
-        elif fallback_executions > 0:
             target["has_activity_today"] = True
             target["activity_source"] = row.get("activity_source") or "sqlite"
         try:
@@ -304,7 +287,7 @@ def format_health(state: _SharedSnapshot) -> str:
 
 def format_status(
     state: _SharedSnapshot,
-    daily_pnl: List[Dict[str, Any]],
+    daily_activity: List[Dict[str, Any]],
     positions_override: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Render /status reply: balance + positions + today's P&L. Pure, unit-testable.
@@ -320,7 +303,7 @@ def format_status(
     positions = positions_override if positions_override is not None else (snap.get("positions") or [])
 
     pnl_by_account: Dict[str, Dict[str, Any]] = {}
-    for row in daily_pnl or []:
+    for row in daily_activity or []:
         if not isinstance(row, dict):
             continue
         pnl_by_account[str(row.get("account") or "")] = row  # last wins on dupes
@@ -555,7 +538,7 @@ class TelegramBotService:
                     asyncio.to_thread(self.bridge_client.safe_positions),
                     asyncio.to_thread(load_sqlite_daily_activity),
                 )
-                daily = merge_daily_activity([], sqlite_activity)
+                daily = merge_daily_activity(sqlite_activity)
                 snap = snapshot_with_runtime(snap, runtime)
             await update.effective_message.reply_text(
                 format_status(snap, daily, positions_override=positions)
