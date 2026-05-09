@@ -10,6 +10,7 @@ from unittest import mock
 from watchdog.codex_adhoc import (
     CodexAdhocConfig,
     CodexAdhocQueue,
+    build_operational_context,
     build_codex_args,
     build_codex_env,
     build_codex_prompt,
@@ -23,12 +24,15 @@ from watchdog.config import load_config
 
 class CodexPromptTests(unittest.TestCase):
     def test_prompt_sets_read_only_operational_scope(self) -> None:
-        out = build_codex_prompt("why is health degraded?")
+        out = build_codex_prompt("why is health degraded?", "live_healthz={\"status\":\"ok\"}")
         self.assertIn("nt-watchdog", out)
         self.assertIn("read-only", out)
         self.assertIn("must not edit files", out)
         self.assertIn("must not call mutating HTTP endpoints", out)
-        self.assertIn("GET http://localhost:8899/healthz", out)
+        self.assertIn("Do not attempt localhost health/status commands", out)
+        self.assertIn("Prefetched read-only operational context", out)
+        self.assertIn("do not lead with sandbox limitations", out)
+        self.assertIn("live_healthz", out)
         self.assertIn("User question: why is health degraded?", out)
 
     def test_args_use_read_only_sandbox_and_no_approval(self) -> None:
@@ -139,10 +143,57 @@ class CodexRunnerTests(unittest.TestCase):
         completed.returncode = 0
         completed.stdout = "ok"
         completed.stderr = ""
-        with mock.patch("watchdog.codex_adhoc.subprocess.run", return_value=completed) as run:
-            self.assertEqual(run_codex_adhoc(cfg, "test"), "ok")
+        with mock.patch("watchdog.codex_adhoc.build_operational_context", return_value=""):
+            with mock.patch("watchdog.codex_adhoc.subprocess.run", return_value=completed) as run:
+                self.assertEqual(run_codex_adhoc(cfg, "test"), "ok")
         self.assertEqual(run.call_args.kwargs["encoding"], "utf-8")
         self.assertEqual(run.call_args.kwargs["errors"], "replace")
+
+    def test_run_includes_operational_context_in_prompt(self) -> None:
+        cfg = CodexAdhocConfig(
+            command="codex",
+            workdir=".",
+            data_dir=tempfile.mkdtemp(),
+            timeout_sec=120,
+            queue_max=2,
+            max_reply_chars=3500,
+        )
+        completed = mock.Mock()
+        completed.returncode = 0
+        completed.stdout = "ok"
+        completed.stderr = ""
+        with mock.patch("watchdog.codex_adhoc.subprocess.run", return_value=completed) as run:
+            with mock.patch("watchdog.codex_adhoc.build_operational_context", return_value="live_healthz={status:ok}"):
+                self.assertEqual(run_codex_adhoc(cfg, "test"), "ok")
+        self.assertIn("live_healthz", run.call_args.kwargs["input"])
+
+    def test_operational_context_reads_logs_and_redacts_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            logs = root / "watchdog" / "logs"
+            logs.mkdir(parents=True)
+            events = logs / "health_events.jsonl"
+            events.write_text('{"kind":"cycle","health_status":"ok"}\n', encoding="utf-8")
+            (logs / "watchdog.log").write_text(
+                'warning: telegram_bot_token: "1234567890:abcdefghijklmnopqrstuvwxyz"\n',
+                encoding="utf-8",
+            )
+            cfg = CodexAdhocConfig(
+                command="codex",
+                workdir=str(root),
+                data_dir=str(root / "state"),
+                timeout_sec=120,
+                queue_max=2,
+                max_reply_chars=3500,
+                bridge_url="http://127.0.0.1:1",
+                health_endpoint="/healthz",
+                events_log_path=str(events),
+            )
+            out = build_operational_context(cfg)
+        self.assertIn("latest_watchdog_events", out)
+        self.assertIn("recent_error_like_log_lines", out)
+        self.assertIn("<redacted>", out)
+        self.assertNotIn("abcdefghijklmnopqrstuvwxyz", out)
 
 
 class CodexConfigTests(unittest.TestCase):

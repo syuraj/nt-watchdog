@@ -515,6 +515,9 @@ class TelegramBotService:
                     timeout_sec=config.telegram_adhoc_codex_timeout_sec,
                     queue_max=config.telegram_adhoc_codex_queue_max,
                     max_reply_chars=config.telegram_adhoc_codex_max_reply_chars,
+                    bridge_url=config.bridge_url,
+                    health_endpoint=config.health_endpoint,
+                    events_log_path=config.events_log_path,
                 )
             )
         else:
