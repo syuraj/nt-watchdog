@@ -302,7 +302,17 @@ class DailyActivityFallbackTests(unittest.TestCase):
 
     def test_merge_sqlite_activity_marks_zero_bridge_row_active(self) -> None:
         daily = [{"account": "SimA", "total_pnl": 0.0, "trades": 0, "executions": 0}]
-        sqlite_rows = [{"account": "SimA", "executions": 2, "has_activity_today": True}]
+        sqlite_rows = [
+            {
+                "account": "SimA",
+                "executions": 2,
+                "has_activity_today": True,
+                "sqlite_realized_pnl": 100.0,
+                "sqlite_closed_trades": 1,
+                "sqlite_wins": 1,
+                "sqlite_losses": 0,
+            }
+        ]
 
         merged = merge_daily_activity(daily, sqlite_rows)
 
@@ -310,6 +320,9 @@ class DailyActivityFallbackTests(unittest.TestCase):
         self.assertEqual(merged[0]["executions"], 2)
         self.assertTrue(merged[0]["has_activity_today"])
         self.assertEqual(merged[0]["activity_source"], "sqlite")
+        self.assertEqual(merged[0]["total_pnl"], 100.0)
+        self.assertEqual(merged[0]["trades"], 1)
+        self.assertEqual(merged[0]["wins"], 1)
 
     def test_sqlite_activity_loader_counts_local_day_executions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -317,13 +330,21 @@ class DailyActivityFallbackTests(unittest.TestCase):
             con = sqlite3.connect(db_path)
             try:
                 con.execute("create table Accounts (Id integer primary key, Name text)")
-                con.execute("create table Executions (Account integer, Time integer)")
+                con.execute("create table Instruments (Id integer primary key, MasterInstrument integer)")
+                con.execute("create table MasterInstruments (Id integer primary key, PointValue real)")
+                con.execute(
+                    "create table Executions ("
+                    "Id integer primary key, Account integer, Instrument integer, Time integer, "
+                    "MarketPosition integer, Price real, Quantity integer)"
+                )
                 con.execute("insert into Accounts values (1, 'SimA')")
                 con.execute("insert into Accounts values (2, 'Old')")
+                con.execute("insert into MasterInstruments values (1, 20.0)")
+                con.execute("insert into Instruments values (1, 1)")
                 now = datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc).astimezone()
-                con.execute("insert into Executions values (1, ?)", (self._ticks(now),))
-                con.execute("insert into Executions values (1, ?)", (self._ticks(now.replace(hour=13)),))
-                con.execute("insert into Executions values (2, ?)", (self._ticks(now.replace(day=7)),))
+                con.execute("insert into Executions values (1, 1, 1, ?, 0, 100.0, 1)", (self._ticks(now),))
+                con.execute("insert into Executions values (2, 1, 1, ?, 1, 105.0, 1)", (self._ticks(now.replace(hour=13)),))
+                con.execute("insert into Executions values (3, 2, 1, ?, 0, 100.0, 1)", (self._ticks(now.replace(day=7)),))
                 con.commit()
             finally:
                 con.close()
@@ -334,6 +355,8 @@ class DailyActivityFallbackTests(unittest.TestCase):
         self.assertEqual(rows[0]["account"], "SimA")
         self.assertEqual(rows[0]["executions"], 2)
         self.assertTrue(rows[0]["has_activity_today"])
+        self.assertEqual(rows[0]["sqlite_realized_pnl"], 100.0)
+        self.assertEqual(rows[0]["sqlite_closed_trades"], 1)
 
 
 class FormatCommandsTests(unittest.TestCase):

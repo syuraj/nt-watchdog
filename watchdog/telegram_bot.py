@@ -75,14 +75,14 @@ def load_sqlite_daily_activity(
     db_path: Optional[Path] = None,
     now: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
-    """Best-effort current local-day execution counts from NT's durable DB."""
+    """Best-effort current local-day execution activity from NT's durable DB."""
     path = db_path or nt_sqlite_path()
     if not path.exists():
         return []
     local_now = now.astimezone() if now is not None else datetime.now().astimezone()
     day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end = day_start + timedelta(days=1)
-    sql = (
+    count_sql = (
         "select a.Name, count(*), min(e.Time), max(e.Time) "
         "from Executions e "
         "join Accounts a on a.Id = e.Account "
@@ -90,16 +90,28 @@ def load_sqlite_daily_activity(
         "group by a.Name "
         "order by a.Name"
     )
+    exec_sql = (
+        "select a.Name, e.Instrument, e.Time, e.MarketPosition, e.Price, e.Quantity, mi.PointValue "
+        "from Executions e "
+        "join Accounts a on a.Id = e.Account "
+        "join Instruments i on i.Id = e.Instrument "
+        "join MasterInstruments mi on mi.Id = i.MasterInstrument "
+        "where e.Time < ? "
+        "order by a.Name, e.Instrument, e.Time, e.Id"
+    )
     try:
         con = sqlite3.connect("file:" + str(path) + "?mode=ro", uri=True)
         try:
-            rows = con.execute(sql, (_dotnet_ticks(day_start), _dotnet_ticks(day_end))).fetchall()
+            start_ticks = _dotnet_ticks(day_start)
+            end_ticks = _dotnet_ticks(day_end)
+            rows = con.execute(count_sql, (start_ticks, end_ticks)).fetchall()
+            exec_rows = con.execute(exec_sql, (end_ticks,)).fetchall()
         finally:
             con.close()
     except sqlite3.Error:
         return []
-    return [
-        {
+    by_account = {
+        str(name or ""): {
             "account": str(name or ""),
             "executions": int(count or 0),
             "has_activity_today": int(count or 0) > 0,
@@ -109,7 +121,86 @@ def load_sqlite_daily_activity(
         }
         for name, count, first_time, last_time in rows
         if name and int(count or 0) > 0
-    ]
+    }
+
+    pnl_by_account = _estimate_sqlite_realized_pnl(exec_rows, start_ticks)
+    for name, pnl_row in pnl_by_account.items():
+        target = by_account.get(name)
+        if target is None:
+            continue
+        target.update(pnl_row)
+    return list(by_account.values())
+
+
+def _execution_side(market_position: Any) -> int:
+    try:
+        value = int(market_position)
+    except (TypeError, ValueError):
+        return 0
+    if value == 0:
+        return 1
+    if value == 1:
+        return -1
+    return 0
+
+
+def _estimate_sqlite_realized_pnl(exec_rows: List[Any], start_ticks: int) -> Dict[str, Dict[str, Any]]:
+    lots_by_key: Dict[tuple, List[List[float]]] = {}
+    pnl_by_account: Dict[str, Dict[str, Any]] = {}
+    for account, instrument_id, time_ticks, market_position, price, quantity, point_value in exec_rows:
+        side = _execution_side(market_position)
+        try:
+            qty_remaining = int(quantity or 0)
+            fill_price = float(price or 0.0)
+            multiplier = float(point_value or 1.0)
+            ticks = int(time_ticks or 0)
+        except (TypeError, ValueError):
+            continue
+        if not account or side == 0 or qty_remaining <= 0:
+            continue
+
+        signed_remaining = side * qty_remaining
+        key = (str(account), instrument_id)
+        lots = lots_by_key.setdefault(key, [])
+        while signed_remaining and lots and (lots[0][0] > 0) != (signed_remaining > 0):
+            lot_qty, lot_price = lots[0]
+            close_qty = min(abs(lot_qty), abs(signed_remaining))
+            if lot_qty > 0:
+                pnl = (fill_price - lot_price) * close_qty * multiplier
+            else:
+                pnl = (lot_price - fill_price) * close_qty * multiplier
+            if ticks >= start_ticks:
+                row = pnl_by_account.setdefault(
+                    str(account),
+                    {
+                        "sqlite_realized_pnl": 0.0,
+                        "sqlite_closed_trades": 0,
+                        "sqlite_wins": 0,
+                        "sqlite_losses": 0,
+                    },
+                )
+                row["sqlite_realized_pnl"] += pnl
+                row["sqlite_closed_trades"] += 1
+                if pnl > 0:
+                    row["sqlite_wins"] += 1
+                elif pnl < 0:
+                    row["sqlite_losses"] += 1
+
+            if abs(lot_qty) == close_qty:
+                lots.pop(0)
+            else:
+                lots[0][0] = lot_qty - (close_qty if lot_qty > 0 else -close_qty)
+            signed_remaining += close_qty if signed_remaining < 0 else -close_qty
+
+        if signed_remaining:
+            lots.append([float(signed_remaining), fill_price])
+    return {
+        name: {
+            **row,
+            "sqlite_realized_pnl": round(float(row["sqlite_realized_pnl"]), 2),
+        }
+        for name, row in pnl_by_account.items()
+    }
 
 
 def merge_daily_activity(
@@ -153,6 +244,28 @@ def merge_daily_activity(
             target["executions"] = fallback_executions
             target["has_activity_today"] = True
             target["activity_source"] = row.get("activity_source") or "sqlite"
+        try:
+            sqlite_realized = float(row.get("sqlite_realized_pnl") or 0.0)
+            existing_total = float(target.get("total_pnl") or 0.0)
+        except (TypeError, ValueError):
+            sqlite_realized = 0.0
+            existing_total = 0.0
+        if abs(existing_total) < 0.005 and abs(sqlite_realized) >= 0.005:
+            target["realized_pnl"] = sqlite_realized
+            target["total_pnl"] = sqlite_realized
+            target["pnl_source"] = "sqlite_estimate"
+        try:
+            existing_trades = int(target.get("trades") or 0)
+        except (TypeError, ValueError):
+            existing_trades = 0
+        try:
+            sqlite_closed = int(row.get("sqlite_closed_trades") or 0)
+        except (TypeError, ValueError):
+            sqlite_closed = 0
+        if existing_trades <= 0 and sqlite_closed > 0:
+            target["trades"] = sqlite_closed
+            target["wins"] = int(row.get("sqlite_wins") or 0)
+            target["losses"] = int(row.get("sqlite_losses") or 0)
 
     return list(merged.values())
 
