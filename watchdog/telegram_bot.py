@@ -195,6 +195,18 @@ def format_status(
     return "\n\n".join(blocks)
 
 
+def snapshot_with_runtime(state: _SharedSnapshot, runtime_snapshot: Dict[str, Any]) -> _SharedSnapshot:
+    """Return a status snapshot using a freshly fetched bridge runtime payload."""
+    if not isinstance(runtime_snapshot, dict) or runtime_snapshot.get("error"):
+        return state
+    return _SharedSnapshot(
+        health=dict(runtime_snapshot.get("health") or state.health or {}),
+        runtime_snapshot=dict(runtime_snapshot),
+        last_cycle_utc=state.last_cycle_utc,
+        started_utc=state.started_utc,
+    )
+
+
 def _fmt_money(val: Any) -> str:
     try:
         n = float(val)
@@ -331,10 +343,12 @@ class TelegramBotService:
                 daily: List[Dict[str, Any]] = []
                 positions: Optional[List[Dict[str, Any]]] = None
             else:
-                daily, positions = await asyncio.gather(
+                runtime, daily, positions = await asyncio.gather(
+                    asyncio.to_thread(self.bridge_client.safe_runtime_snapshot),
                     asyncio.to_thread(self.bridge_client.safe_daily_pnl),
                     asyncio.to_thread(self.bridge_client.safe_positions),
                 )
+                snap = snapshot_with_runtime(snap, runtime)
             await update.effective_message.reply_text(
                 format_status(snap, daily, positions_override=positions)
             )

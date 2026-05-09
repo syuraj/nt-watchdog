@@ -10,6 +10,7 @@ from watchdog.telegram_bot import (
     format_commands,
     format_health,
     format_status,
+    snapshot_with_runtime,
 )
 
 
@@ -255,6 +256,24 @@ class FormatStatusTests(unittest.TestCase):
         state = TelegramSharedState()
         out = format_status(state.snapshot(), [])
         self.assertIn("No snapshot yet", out)
+
+    def test_fresh_runtime_snapshot_replaces_cached_accounts(self) -> None:
+        state = self._publish(
+            accounts=[{"name": "Stale", "connected": True, "cash": 100.0}],
+            positions=[],
+        )
+        fresh = snapshot_with_runtime(
+            state.snapshot(),
+            {
+                "health": {"status": "ok"},
+                "accounts": [{"name": "Fresh", "connected": True, "cash": 200.0}],
+                "positions": [],
+            },
+        )
+        daily = [{"account": "Fresh", "total_pnl": 25.0, "trades": 1, "wins": 1, "losses": 0}]
+        out = format_status(fresh, daily, positions_override=[])
+        self.assertIn("Fresh", out)
+        self.assertNotIn("Stale", out)
 
     def test_position_for_disconnected_account_hidden(self) -> None:
         state = self._publish(
