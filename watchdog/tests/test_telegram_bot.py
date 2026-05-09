@@ -324,6 +324,27 @@ class DailyActivityFallbackTests(unittest.TestCase):
         self.assertEqual(merged[0]["trades"], 1)
         self.assertEqual(merged[0]["wins"], 1)
 
+    def test_sqlite_activity_overrides_unreliable_bridge_daily_row(self) -> None:
+        daily = [{"account": "SimA", "total_pnl": 5.0, "trades": 9, "wins": 4, "losses": 5, "executions": 99}]
+        sqlite_rows = [
+            {
+                "account": "SimA",
+                "executions": 2,
+                "has_activity_today": True,
+                "sqlite_realized_pnl": 100.0,
+                "sqlite_closed_trades": 1,
+                "sqlite_wins": 1,
+                "sqlite_losses": 0,
+            }
+        ]
+
+        merged = merge_daily_activity(daily, sqlite_rows)
+
+        self.assertEqual(merged[0]["total_pnl"], 100.0)
+        self.assertEqual(merged[0]["trades"], 1)
+        self.assertEqual(merged[0]["wins"], 1)
+        self.assertEqual(merged[0]["losses"], 0)
+
     def test_sqlite_activity_loader_counts_local_day_executions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "NinjaTrader.sqlite"

@@ -207,7 +207,7 @@ def merge_daily_activity(
     daily_pnl: List[Dict[str, Any]],
     sqlite_activity: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Add SQLite execution evidence when bridge in-memory counts are empty."""
+    """Build daily rows from SQLite activity, with optional legacy bridge fallback."""
     merged: Dict[str, Dict[str, Any]] = {}
     for row in daily_pnl or []:
         if not isinstance(row, dict):
@@ -244,25 +244,22 @@ def merge_daily_activity(
             target["executions"] = fallback_executions
             target["has_activity_today"] = True
             target["activity_source"] = row.get("activity_source") or "sqlite"
+        elif fallback_executions > 0:
+            target["has_activity_today"] = True
+            target["activity_source"] = row.get("activity_source") or "sqlite"
         try:
             sqlite_realized = float(row.get("sqlite_realized_pnl") or 0.0)
-            existing_total = float(target.get("total_pnl") or 0.0)
         except (TypeError, ValueError):
             sqlite_realized = 0.0
-            existing_total = 0.0
-        if abs(existing_total) < 0.005 and abs(sqlite_realized) >= 0.005:
+        if abs(sqlite_realized) >= 0.005:
             target["realized_pnl"] = sqlite_realized
             target["total_pnl"] = sqlite_realized
             target["pnl_source"] = "sqlite_estimate"
         try:
-            existing_trades = int(target.get("trades") or 0)
-        except (TypeError, ValueError):
-            existing_trades = 0
-        try:
             sqlite_closed = int(row.get("sqlite_closed_trades") or 0)
         except (TypeError, ValueError):
             sqlite_closed = 0
-        if existing_trades <= 0 and sqlite_closed > 0:
+        if sqlite_closed > 0:
             target["trades"] = sqlite_closed
             target["wins"] = int(row.get("sqlite_wins") or 0)
             target["losses"] = int(row.get("sqlite_losses") or 0)
@@ -553,13 +550,12 @@ class TelegramBotService:
                 daily: List[Dict[str, Any]] = []
                 positions: Optional[List[Dict[str, Any]]] = None
             else:
-                runtime, daily, positions, sqlite_activity = await asyncio.gather(
+                runtime, positions, sqlite_activity = await asyncio.gather(
                     asyncio.to_thread(self.bridge_client.safe_runtime_snapshot),
-                    asyncio.to_thread(self.bridge_client.safe_daily_pnl),
                     asyncio.to_thread(self.bridge_client.safe_positions),
                     asyncio.to_thread(load_sqlite_daily_activity),
                 )
-                daily = merge_daily_activity(daily, sqlite_activity)
+                daily = merge_daily_activity([], sqlite_activity)
                 snap = snapshot_with_runtime(snap, runtime)
             await update.effective_message.reply_text(
                 format_status(snap, daily, positions_override=positions)
