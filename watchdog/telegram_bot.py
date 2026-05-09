@@ -260,24 +260,36 @@ def format_health(state: _SharedSnapshot) -> str:
     total = conn.get("total", "?")
     connected = conn.get("connected", "?")
 
-    dot = "\U0001F7E2" if isinstance(connected, int) and connected > 0 and status == "ok" else "\U0001F534"
-
     strat_info = snap.get("strategy_runtime") or {}
     strategies = strat_info.get("strategies") or []
-    active = sum(1 for s in strategies if s.get("is_enabled"))
+    active = sum(1 for s in strategies if _strategy_is_active(s))
     total_strats = len(strategies)
+    any_inactive_strategy = any(not _strategy_is_active(s) for s in strategies)
+
+    if not (isinstance(connected, int) and connected > 0 and status == "ok"):
+        dot = "\U0001F534"
+    elif any_inactive_strategy:
+        dot = "\U0001F7E1"
+    else:
+        dot = "\U0001F7E2"
 
     lines: List[str] = []
     lines.append(f"{dot} NT connections: {connected}/{total}")
     lines.append(f"Strategies: {active} active / {total_strats} total")
     for s in strategies:
         name = str(s.get("name") or "?")
-        is_on = bool(s.get("is_enabled"))
+        account = str(s.get("account") or "?")
         state_str = str(s.get("state") or "")
-        marker = "active" if is_on else "off"
-        if state_str and state_str.lower() not in {"active", "realtime"}:
-            marker = f"{marker}/{state_str}"
-        lines.append(f" \u2022 {name} ({marker})")
+        details = [account]
+        if not _strategy_is_active(s):
+            status_parts = []
+            if not bool(s.get("is_enabled")):
+                status_parts.append("off")
+            if state_str and state_str.lower() not in {"active", "realtime"}:
+                status_parts.append(state_str)
+            if status_parts:
+                details.append("/".join(status_parts))
+        lines.append(f" \u2022 {name} ({', '.join(details)})")
     lines.append(f"Health: {status}")
     reasons = health.get("reasons") or []
     if isinstance(reasons, list) and reasons:
@@ -413,6 +425,13 @@ def _pnl_dot(val: Any) -> str:
     except (TypeError, ValueError):
         n = 0.0
     return "\U0001F534" if n < -0.005 else "\U0001F7E2"
+
+
+def _strategy_is_active(strategy: Dict[str, Any]) -> bool:
+    if not bool(strategy.get("is_enabled")):
+        return False
+    state = str(strategy.get("state") or "").lower()
+    return not state or state in {"active", "realtime"}
 
 
 def format_commands() -> str:

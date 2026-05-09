@@ -28,18 +28,19 @@ class FormatHealthTests(unittest.TestCase):
             {
                 "strategy_runtime": {
                     "strategies": [
-                        {"name": "S1", "is_enabled": True, "state": "Realtime"},
-                        {"name": "S2", "is_enabled": True, "state": "Realtime"},
+                        {"name": "S1", "is_enabled": True, "state": "Realtime", "account": "SimA"},
+                        {"name": "S2", "is_enabled": True, "state": "Realtime", "account": "SimB"},
                     ]
                 }
             },
         )
         out = format_health(state.snapshot())
-        self.assertIn("🟢", out)
+        self.assertIn("\U0001F7E2", out)
         self.assertIn("NT connections: 1/1", out)
         self.assertIn("Strategies: 2 active / 2 total", out)
-        self.assertIn("S1 (active)", out)
-        self.assertIn("S2 (active)", out)
+        self.assertIn("S1 (SimA)", out)
+        self.assertIn("S2 (SimB)", out)
+        self.assertNotIn("(active)", out)
         self.assertIn("Health: ok", out)
 
     def test_disconnected_shows_red(self) -> None:
@@ -49,28 +50,32 @@ class FormatHealthTests(unittest.TestCase):
             {"strategy_runtime": {"strategies": []}},
         )
         out = format_health(state.snapshot())
-        self.assertIn("🔴", out)
+        self.assertIn("\U0001F534", out)
         self.assertIn("Strategies: 0 active / 0 total", out)
         self.assertIn("Reasons: no_connections_detected", out)
 
-    def test_disabled_strategy_marked_off(self) -> None:
+    def test_inactive_strategy_makes_connection_dot_yellow_and_keeps_account(self) -> None:
         state = TelegramSharedState()
         state.publish(
             {"status": "ok", "connections": {"total": 1, "connected": 1}},
             {
                 "strategy_runtime": {
                     "strategies": [
-                        {"name": "S1", "is_enabled": False, "state": "Finalized"},
+                        {"name": "S1", "is_enabled": True, "state": "Realtime", "account": "SimA"},
+                        {"name": "S2", "is_enabled": False, "state": "Finalized", "account": "SimB"},
                     ]
                 }
             },
         )
         out = format_health(state.snapshot())
-        self.assertIn("S1 (off/Finalized)", out)
+        self.assertIn("\U0001F7E1 NT connections: 1/1", out)
+        self.assertIn("Strategies: 1 active / 2 total", out)
+        self.assertIn("S1 (SimA)", out)
+        self.assertIn("S2 (SimB, off/Finalized)", out)
 
     def test_missing_fields_render_safely(self) -> None:
         state = TelegramSharedState()
-        # No publish call — snapshot is empty dicts.
+        # No publish call - snapshot is empty dicts.
         out = format_health(state.snapshot())
         self.assertIn("Health: unknown", out)
         self.assertIn("NT connections: ?/?", out)
