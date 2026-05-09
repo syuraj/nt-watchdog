@@ -124,9 +124,38 @@ def format_status(
             continue
         positions_by_account.setdefault(str(p.get("account") or ""), []).append(p)
 
+    def _as_int(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _as_float(value: Any) -> float:
+        try:
+            return float(value or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _as_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
     def _is_active(name: str) -> bool:
         row = pnl_by_account.get(name) or {}
-        if int(row.get("trades") or 0) > 0:
+        if _as_bool(row.get("has_activity_today")):
+            return True
+        if _as_int(row.get("trades")) > 0:
+            return True
+        if _as_int(row.get("executions")) > 0:
+            return True
+        if abs(_as_float(row.get("total_pnl"))) >= 0.005:
+            return True
+        if abs(_as_float(row.get("realized_pnl"))) >= 0.005:
+            return True
+        if abs(_as_float(row.get("unrealized_pnl"))) >= 0.005:
             return True
         return bool(positions_by_account.get(name))
 
@@ -143,14 +172,17 @@ def format_status(
         cash = _fmt_money(acc.get("cash"))
         row = pnl_by_account.get(name) or {}
         total = _fmt_money(row.get("total_pnl"))
-        trades = int(row.get("trades") or 0)
-        wins = int(row.get("wins") or 0)
-        losses = int(row.get("losses") or 0)
+        trades = _as_int(row.get("trades"))
+        executions = _as_int(row.get("executions"))
+        wins = _as_int(row.get("wins"))
+        losses = _as_int(row.get("losses"))
         acc_lines = [
             f"💰 {name}",
             f"  Cash: {cash}",
             f"  Today: {total} · {trades} closed ({wins}W/{losses}L)",
         ]
+        if trades == 0 and executions > 0:
+            acc_lines.append(f"  Activity: {executions} executions")
         for p in positions_by_account.get(name, []):
             instr = str(p.get("instrument") or "?")
             side = str(p.get("side") or "?")

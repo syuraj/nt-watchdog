@@ -45,7 +45,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Bump BuildId whenever editing HealthBridge.cs so the client can detect whether
         // NT is running the freshly-compiled DLL or a stale in-memory AddOn instance.
         // Format: UTC timestamp at edit time.
-        private const string BuildId = "2026-04-30T22:15:00Z";
+        private const string BuildId = "2026-05-09T02:27:04Z";
         private static readonly long _startedUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastRequestUtcTicks = DateTime.UtcNow.Ticks;
         private static long _lastMainThreadTickUtcTicks = DateTime.UtcNow.Ticks;
@@ -495,7 +495,9 @@ namespace NinjaTrader.NinjaScript.AddOns
         private string GetDailyPnlJson(System.Collections.Specialized.NameValueCollection qs)
         {
             string filterAccount = qs["account"];
-            DateTime today = DateTime.Today;
+            DateTime dayStartLocal = DateTime.Today;
+            DateTime dayEndLocal = dayStartLocal.AddDays(1);
+            string localTimeZone = TimeZoneInfo.Local.Id;
 
             var sb = new StringBuilder("[");
             bool first = true;
@@ -518,6 +520,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                 int tradeCount = 0;
                 int wins = 0;
                 int losses = 0;
+                int executionCount = 0;
 
                 SystemPerformance perf2;
                 try { perf2 = SystemPerformance.Calculate(acc.Executions); }
@@ -527,24 +530,47 @@ namespace NinjaTrader.NinjaScript.AddOns
                 foreach (var trade in perf2.AllTrades)
                 {
                     if (trade.Exit == null) continue;
-                    if (trade.Exit.Time.Date != today) continue;
+                    DateTime exitLocal = ToLocalCalendarTime(trade.Exit.Time);
+                    if (exitLocal < dayStartLocal || exitLocal >= dayEndLocal) continue;
                     tradeCount++;
                     if (trade.ProfitCurrency > 0) wins++;
                     else if (trade.ProfitCurrency < 0) losses++;
                 }
 
+                try
+                {
+                    foreach (var exec in acc.Executions)
+                    {
+                        if (exec == null) continue;
+                        DateTime execLocal = ToLocalCalendarTime(exec.Time);
+                        if (execLocal >= dayStartLocal && execLocal < dayEndLocal)
+                            executionCount++;
+                    }
+                }
+                catch { }
+
                 double unrealized = 0;
                 try { unrealized = acc.Get(AccountItem.UnrealizedProfitLoss, Currency.UsDollar); }
                 catch { }
 
+                bool hasActivityToday = tradeCount > 0
+                    || executionCount > 0
+                    || Math.Abs(realized) >= 0.005
+                    || Math.Abs(unrealized) >= 0.005;
+
                 if (!first) sb.Append(",");
                 sb.Append("{");
                 sb.Append("\"account\":\"").Append(JsonEscape(acc.Name)).Append("\",");
-                sb.Append("\"date\":\"").Append(today.ToString("yyyy-MM-dd")).Append("\",");
+                sb.Append("\"date\":\"").Append(dayStartLocal.ToString("yyyy-MM-dd")).Append("\",");
+                sb.Append("\"day_start_local\":\"").Append(dayStartLocal.ToString("yyyy-MM-ddTHH:mm:ss")).Append("\",");
+                sb.Append("\"day_end_local\":\"").Append(dayEndLocal.ToString("yyyy-MM-ddTHH:mm:ss")).Append("\",");
+                sb.Append("\"timezone\":\"").Append(JsonEscape(localTimeZone)).Append("\",");
                 sb.Append("\"realized_pnl\":").Append(realized.ToString("F2")).Append(",");
                 sb.Append("\"unrealized_pnl\":").Append(unrealized.ToString("F2")).Append(",");
                 sb.Append("\"total_pnl\":").Append((realized + unrealized).ToString("F2")).Append(",");
                 sb.Append("\"trades\":").Append(tradeCount).Append(",");
+                sb.Append("\"executions\":").Append(executionCount).Append(",");
+                sb.Append("\"has_activity_today\":").Append(hasActivityToday ? "true" : "false").Append(",");
                 sb.Append("\"wins\":").Append(wins).Append(",");
                 sb.Append("\"losses\":").Append(losses);
                 sb.Append("}");
@@ -552,6 +578,13 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
             sb.Append("]");
             return sb.ToString();
+        }
+
+        private DateTime ToLocalCalendarTime(DateTime value)
+        {
+            if (value.Kind == DateTimeKind.Utc)
+                return value.ToLocalTime();
+            return value;
         }
 
         private string GetHealthzJson()

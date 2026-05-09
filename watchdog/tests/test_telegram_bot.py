@@ -179,6 +179,56 @@ class FormatStatusTests(unittest.TestCase):
         self.assertNotIn("Idle", out)
         self.assertIn("Active", out)
 
+    def test_zero_closed_trades_with_pnl_still_shows_account(self) -> None:
+        state = self._publish(
+            accounts=[
+                {"name": "Active", "connected": True, "cash": 10000.0,
+                 "realized_pnl": 0.0, "unrealized_pnl": 0.0},
+            ],
+            positions=[],
+        )
+        daily = [
+            {"account": "Active", "total_pnl": 125.5, "realized_pnl": 125.5,
+             "unrealized_pnl": 0.0, "trades": 0, "wins": 0, "losses": 0},
+        ]
+        out = format_status(state.snapshot(), daily)
+        self.assertIn("Active", out)
+        self.assertIn("$125.50", out)
+        self.assertIn("0 closed", out)
+
+    def test_zero_closed_trades_with_executions_still_shows_account(self) -> None:
+        state = self._publish(
+            accounts=[
+                {"name": "Active", "connected": True, "cash": 10000.0,
+                 "realized_pnl": 0.0, "unrealized_pnl": 0.0},
+            ],
+            positions=[],
+        )
+        daily = [
+            {"account": "Active", "total_pnl": 0.0, "trades": 0,
+             "executions": 4, "wins": 0, "losses": 0},
+        ]
+        out = format_status(state.snapshot(), daily)
+        self.assertIn("Active", out)
+        self.assertIn("0 closed", out)
+        self.assertIn("4 executions", out)
+
+    def test_has_activity_today_still_shows_account(self) -> None:
+        state = self._publish(
+            accounts=[
+                {"name": "Scratch", "connected": True, "cash": 10000.0,
+                 "realized_pnl": 0.0, "unrealized_pnl": 0.0},
+            ],
+            positions=[],
+        )
+        daily = [
+            {"account": "Scratch", "total_pnl": 0.0, "trades": 0,
+             "executions": 0, "wins": 0, "losses": 0, "has_activity_today": True},
+        ]
+        out = format_status(state.snapshot(), daily)
+        self.assertIn("Scratch", out)
+        self.assertIn("0 closed", out)
+
     def test_disconnected_account_filtered_out(self) -> None:
         state = self._publish(
             accounts=[
