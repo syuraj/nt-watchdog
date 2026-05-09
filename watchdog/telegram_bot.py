@@ -14,9 +14,11 @@ Commands:
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .bridge_client import BridgeClient
@@ -58,6 +60,101 @@ class TelegramSharedState:
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _dotnet_ticks(value: datetime) -> int:
+    epoch = datetime(1, 1, 1, tzinfo=timezone.utc)
+    return int((value.astimezone(timezone.utc) - epoch).total_seconds() * 10000000)
+
+
+def nt_sqlite_path() -> Path:
+    return Path.home() / "Documents" / "NinjaTrader 8" / "db" / "NinjaTrader.sqlite"
+
+
+def load_sqlite_daily_activity(
+    db_path: Optional[Path] = None,
+    now: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Best-effort current local-day execution counts from NT's durable DB."""
+    path = db_path or nt_sqlite_path()
+    if not path.exists():
+        return []
+    local_now = now.astimezone() if now is not None else datetime.now().astimezone()
+    day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+    sql = (
+        "select a.Name, count(*), min(e.Time), max(e.Time) "
+        "from Executions e "
+        "join Accounts a on a.Id = e.Account "
+        "where e.Time >= ? and e.Time < ? "
+        "group by a.Name "
+        "order by a.Name"
+    )
+    try:
+        con = sqlite3.connect("file:" + str(path) + "?mode=ro", uri=True)
+        try:
+            rows = con.execute(sql, (_dotnet_ticks(day_start), _dotnet_ticks(day_end))).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return []
+    return [
+        {
+            "account": str(name or ""),
+            "executions": int(count or 0),
+            "has_activity_today": int(count or 0) > 0,
+            "sqlite_first_execution_ticks": first_time,
+            "sqlite_last_execution_ticks": last_time,
+            "activity_source": "sqlite",
+        }
+        for name, count, first_time, last_time in rows
+        if name and int(count or 0) > 0
+    ]
+
+
+def merge_daily_activity(
+    daily_pnl: List[Dict[str, Any]],
+    sqlite_activity: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Add SQLite execution evidence when bridge in-memory counts are empty."""
+    merged: Dict[str, Dict[str, Any]] = {}
+    for row in daily_pnl or []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("account") or "")
+        if name:
+            merged[name] = dict(row)
+
+    for row in sqlite_activity or []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("account") or "")
+        if not name:
+            continue
+        target = merged.setdefault(
+            name,
+            {
+                "account": name,
+                "total_pnl": 0.0,
+                "trades": 0,
+                "wins": 0,
+                "losses": 0,
+            },
+        )
+        try:
+            existing_executions = int(target.get("executions") or 0)
+        except (TypeError, ValueError):
+            existing_executions = 0
+        try:
+            fallback_executions = int(row.get("executions") or 0)
+        except (TypeError, ValueError):
+            fallback_executions = 0
+        if existing_executions <= 0 and fallback_executions > 0:
+            target["executions"] = fallback_executions
+            target["has_activity_today"] = True
+            target["activity_source"] = row.get("activity_source") or "sqlite"
+
+    return list(merged.values())
 
 
 def format_health(state: _SharedSnapshot) -> str:
@@ -343,11 +440,13 @@ class TelegramBotService:
                 daily: List[Dict[str, Any]] = []
                 positions: Optional[List[Dict[str, Any]]] = None
             else:
-                runtime, daily, positions = await asyncio.gather(
+                runtime, daily, positions, sqlite_activity = await asyncio.gather(
                     asyncio.to_thread(self.bridge_client.safe_runtime_snapshot),
                     asyncio.to_thread(self.bridge_client.safe_daily_pnl),
                     asyncio.to_thread(self.bridge_client.safe_positions),
+                    asyncio.to_thread(load_sqlite_daily_activity),
                 )
+                daily = merge_daily_activity(daily, sqlite_activity)
                 snap = snapshot_with_runtime(snap, runtime)
             await update.effective_message.reply_text(
                 format_status(snap, daily, positions_override=positions)
