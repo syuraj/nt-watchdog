@@ -30,12 +30,17 @@ Two parts:
    telegram_chat_id: "<chat_id>"
    telegram_allowed_user_ids: "<user_ids>"
    ```
+   Whitelisted Telegram users can also send plain text or unknown `/commands`
+   as ad hoc Codex questions. Those runs use a read-only Codex sandbox, no
+   approval escalation, a timeout, and a capped reply.
 5. Start watchdog:
    - `python scripts/manage_watchdog.py run`
 
 Optional env overrides:
 - `setx WATCHDOG_NO_CONNECTIONS_RECOVERY_COOLDOWN_SEC "300"`
 - `setx WATCHDOG_NOTIFICATION_COOLDOWN_SEC "900"`
+- `setx TELEGRAM_ADHOC_CODEX_TIMEOUT_SEC "120"`
+- `setx TELEGRAM_ADHOC_CODEX_QUEUE_MAX "2"`
 
 ## Verify
 - Bridge liveness:
@@ -62,6 +67,7 @@ Scheduled task triggered on TerminalServices Event ID 24 runs `tscon /dest:conso
 - Runtime events: `watchdog/logs/health_events.jsonl`
 - Last good snapshot: `watchdog/state/last_good_snapshot.json`
 - Runtime counters: `watchdog/state/runtime_state.json`
+- Temporary ad hoc Codex handoff directory: `watchdog/state/codex_adhoc`
 
 ## Notes
 - NT8 strategy re-enable APIs are limited. Watchdog uses UI automation to toggle strategy checkboxes on the Strategies tab after reconnect; falls back to manual restore request if UIA fails.

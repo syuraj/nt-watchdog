@@ -42,3 +42,13 @@ telegram_chat_id: ""
 telegram_parse_mode: ""
 telegram_allowed_user_ids: []
 
+# Whitelisted Telegram users can send plain text or unknown /commands as
+# ad hoc Codex questions. Codex runs in read-only sandbox mode with no approval
+# escalation, a concise reply cap, and a small FIFO queue.
+telegram_adhoc_codex_enabled: true
+telegram_adhoc_codex_command: "C:\\Users\\sshrestha\\AppData\\Roaming\\npm\\codex.ps1"
+telegram_adhoc_codex_workdir: ""
+telegram_adhoc_codex_data_dir: "watchdog/state/codex_adhoc"
+telegram_adhoc_codex_timeout_sec: 120
+telegram_adhoc_codex_queue_max: 2
+telegram_adhoc_codex_max_reply_chars: 3500

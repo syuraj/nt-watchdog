@@ -19,9 +19,10 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from .bridge_client import BridgeClient
+from .codex_adhoc import CodexAdhocConfig, CodexAdhocQueue
 from .config import WatchdogConfig
 
 
@@ -459,6 +460,28 @@ def format_restart_result(result: Dict[str, Any]) -> str:
     return f"\u274c Restart failed: {err}"
 
 
+async def await_with_typing(
+    awaitable: Awaitable[str],
+    send_typing: Callable[[], Awaitable[None]],
+    interval_sec: float = 4.0,
+) -> str:
+    task = asyncio.create_task(awaitable)
+    try:
+        while not task.done():
+            try:
+                await send_typing()
+            except Exception:
+                pass
+            try:
+                return await asyncio.wait_for(asyncio.shield(task), timeout=interval_sec)
+            except asyncio.TimeoutError:
+                continue
+        return await task
+    finally:
+        if not task.done():
+            task.cancel()
+
+
 class TelegramBotService:
     """Manages the PTB Application lifecycle on a daemon thread.
 
@@ -475,11 +498,27 @@ class TelegramBotService:
         shared_state: TelegramSharedState,
         restart_handler: Optional[Callable[[], Dict[str, Any]]] = None,
         bridge_client: Optional[BridgeClient] = None,
+        codex_queue: Optional[CodexAdhocQueue] = None,
     ) -> None:
         self.config = config
         self.shared_state = shared_state
         self.restart_handler = restart_handler
         self.bridge_client = bridge_client
+        if codex_queue is not None:
+            self.codex_queue = codex_queue
+        elif config.telegram_adhoc_codex_enabled:
+            self.codex_queue = CodexAdhocQueue(
+                CodexAdhocConfig(
+                    command=config.telegram_adhoc_codex_command,
+                    workdir=config.telegram_adhoc_codex_workdir,
+                    data_dir=config.telegram_adhoc_codex_data_dir,
+                    timeout_sec=config.telegram_adhoc_codex_timeout_sec,
+                    queue_max=config.telegram_adhoc_codex_queue_max,
+                    max_reply_chars=config.telegram_adhoc_codex_max_reply_chars,
+                )
+            )
+        else:
+            self.codex_queue = None
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._application = None
@@ -549,6 +588,7 @@ class TelegramBotService:
     async def _run_async(self) -> None:
         # Import PTB lazily so watchdog can still run if the dep is missing.
         from telegram import BotCommand, Update
+        from telegram.constants import ChatAction
         from telegram.ext import (
             Application,
             CommandHandler,
@@ -596,7 +636,25 @@ class TelegramBotService:
             await update.effective_message.reply_text(format_restart_result(result or {}))
 
         async def cmd_unknown(update, context) -> None:  # type: ignore[no-untyped-def]
-            await update.effective_message.reply_text(format_commands())
+            message = update.effective_message
+            text = str(getattr(message, "text", "") or "").strip()
+            if not text:
+                return
+            if self.codex_queue is None:
+                await message.reply_text(format_commands())
+                return
+            user_id = int(getattr(update.effective_user, "id", 0) or 0)
+
+            async def send_typing() -> None:
+                chat = update.effective_chat
+                if chat is not None:
+                    await context.bot.send_chat_action(
+                        chat_id=chat.id,
+                        action=ChatAction.TYPING,
+                    )
+
+            answer = await await_with_typing(self.codex_queue.ask(user_id, text), send_typing)
+            await message.reply_text(answer)
 
         app = (
             Application.builder()
@@ -607,7 +665,8 @@ class TelegramBotService:
         app.add_handler(CommandHandler("status", cmd_status, filters=user_filter))
         app.add_handler(CommandHandler("restart", cmd_restart, filters=user_filter))
         # Any other text from a whitelisted user (unknown command or plain text)
-        # gets /help. Non-whitelisted users are silently dropped by user_filter.
+        # is treated as an ad hoc Codex question. Non-whitelisted users are
+        # silently dropped by user_filter.
         app.add_handler(MessageHandler(user_filter & filters.TEXT, cmd_unknown))
 
         self._application = app

@@ -39,6 +39,13 @@ class WatchdogConfig:
     # disable the command bot even if notifier is enabled. Use user IDs (not
     # chat IDs) so group-chat members don't inherit access.
     telegram_allowed_user_ids: List[int] = field(default_factory=list)
+    telegram_adhoc_codex_enabled: bool = True
+    telegram_adhoc_codex_command: str = "codex"
+    telegram_adhoc_codex_workdir: str = "."
+    telegram_adhoc_codex_data_dir: str = "watchdog/state/codex_adhoc"
+    telegram_adhoc_codex_timeout_sec: int = 120
+    telegram_adhoc_codex_queue_max: int = 2
+    telegram_adhoc_codex_max_reply_chars: int = 3500
 
 
 def _to_bool(value: str, default: bool) -> bool:
@@ -152,6 +159,29 @@ def load_config(path: str) -> WatchdogConfig:
         "telegram_allowed_user_ids",
         _to_int_list(os.getenv("TELEGRAM_ALLOWED_USER_IDS"), cfg.telegram_allowed_user_ids),
     )
+    _set_if_present(
+        cfg,
+        "telegram_adhoc_codex_enabled",
+        _to_bool(os.getenv("TELEGRAM_ADHOC_CODEX_ENABLED"), cfg.telegram_adhoc_codex_enabled),
+    )
+    _set_if_present(cfg, "telegram_adhoc_codex_command", os.getenv("TELEGRAM_ADHOC_CODEX_COMMAND"))
+    _set_if_present(cfg, "telegram_adhoc_codex_workdir", os.getenv("TELEGRAM_ADHOC_CODEX_WORKDIR"))
+    _set_if_present(cfg, "telegram_adhoc_codex_data_dir", os.getenv("TELEGRAM_ADHOC_CODEX_DATA_DIR"))
+    _set_if_present(
+        cfg,
+        "telegram_adhoc_codex_timeout_sec",
+        _to_int(os.getenv("TELEGRAM_ADHOC_CODEX_TIMEOUT_SEC"), cfg.telegram_adhoc_codex_timeout_sec),
+    )
+    _set_if_present(
+        cfg,
+        "telegram_adhoc_codex_queue_max",
+        _to_int(os.getenv("TELEGRAM_ADHOC_CODEX_QUEUE_MAX"), cfg.telegram_adhoc_codex_queue_max),
+    )
+    _set_if_present(
+        cfg,
+        "telegram_adhoc_codex_max_reply_chars",
+        _to_int(os.getenv("TELEGRAM_ADHOC_CODEX_MAX_REPLY_CHARS"), cfg.telegram_adhoc_codex_max_reply_chars),
+    )
 
     cfg.bridge_url = cfg.bridge_url.rstrip("/")
     cfg.connection_names = _to_list(cfg.connection_names, [])
@@ -164,5 +194,13 @@ def load_config(path: str) -> WatchdogConfig:
         events_log_path = (base_dir / events_log_path).resolve()
     cfg.snapshot_path = str(snapshot_path)
     cfg.events_log_path = str(events_log_path)
+    workdir_path = Path(cfg.telegram_adhoc_codex_workdir or str(base_dir))
+    data_dir_path = Path(cfg.telegram_adhoc_codex_data_dir)
+    if not workdir_path.is_absolute():
+        workdir_path = (base_dir / workdir_path).resolve()
+    if not data_dir_path.is_absolute():
+        data_dir_path = (base_dir / data_dir_path).resolve()
+    cfg.telegram_adhoc_codex_workdir = str(workdir_path)
+    cfg.telegram_adhoc_codex_data_dir = str(data_dir_path)
     return cfg
 

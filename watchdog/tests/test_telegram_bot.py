@@ -4,6 +4,7 @@ import threading
 import unittest
 import sqlite3
 import tempfile
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from watchdog.config import WatchdogConfig
 from watchdog.telegram_bot import (
     TelegramBotService,
     TelegramSharedState,
+    await_with_typing,
     format_commands,
     format_health,
     format_status,
@@ -422,6 +424,24 @@ class FormatRestartResultTests(unittest.TestCase):
         out = format_restart_result({"ok": False, "error": "process_restart_failed"})
         self.assertIn("❌", out)
         self.assertIn("process_restart_failed", out)
+
+
+class TypingActionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wait_with_typing_sends_until_answer_ready(self) -> None:
+        calls = 0
+
+        async def answer() -> str:
+            await asyncio.sleep(0.03)
+            return "done"
+
+        async def send_typing() -> None:
+            nonlocal calls
+            calls += 1
+
+        out = await await_with_typing(answer(), send_typing, interval_sec=0.01)
+
+        self.assertEqual(out, "done")
+        self.assertGreaterEqual(calls, 2)
 
 
 class SharedStateThreadSafetyTests(unittest.TestCase):
