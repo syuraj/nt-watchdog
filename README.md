@@ -33,6 +33,8 @@ Two parts:
    Whitelisted Telegram users can also send plain text or unknown `/commands`
    as ad hoc Codex questions. Those runs use a read-only Codex sandbox, no
    approval escalation, a timeout, and a capped reply.
+   Use `/errors` to run a Codex review of recent NinjaTrader, account/order,
+   HealthBridge, and watchdog errors.
 5. Start watchdog:
    - `python scripts/manage_watchdog.py run`
 

@@ -26,6 +26,7 @@ class CodexAdhocConfig:
     max_reply_chars: int
     bridge_url: str = "http://localhost:8899"
     health_endpoint: str = "/healthz"
+    runtime_snapshot_endpoint: str = "/runtime_snapshot"
     events_log_path: str = "watchdog/logs/health_events.jsonl"
 
 
@@ -93,6 +94,36 @@ def _safe_json(payload: Any, max_chars: int = 2500) -> str:
     return _truncate(_redact_text(text), max_chars)
 
 
+def _get_json(url: str, timeout_sec: int) -> Any:
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"Accept": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+
+def _runtime_summary(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"error": "runtime snapshot payload was not an object"}
+    summary: Dict[str, Any] = {}
+    for key in ("accounts", "positions"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            summary[key] = value[:20]
+    strat = payload.get("strategy_runtime")
+    if isinstance(strat, dict):
+        summary["strategy_runtime"] = {
+            "strategies": (strat.get("strategies") or [])[:20],
+            "count": len(strat.get("strategies") or []),
+        }
+    health = payload.get("health")
+    if isinstance(health, dict):
+        summary["health"] = health
+    return summary or {"keys": sorted(str(k) for k in payload.keys())[:30]}
+
+
 def _tail_lines(path: Path, max_lines: int) -> List[str]:
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -136,16 +167,16 @@ def build_operational_context(cfg: CodexAdhocConfig) -> str:
     ]
 
     try:
-        req = urllib.request.Request(
-            cfg.bridge_url.rstrip("/") + cfg.health_endpoint,
-            method="GET",
-            headers={"Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=4) as resp:
-            health_payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+        health_payload = _get_json(cfg.bridge_url.rstrip("/") + cfg.health_endpoint, timeout_sec=4)
         sections.append(f"- live_healthz={_safe_json(health_payload)}")
     except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
         sections.append(f"- live_healthz_error={type(exc).__name__}: {_redact_text(str(exc))}")
+
+    try:
+        runtime_payload = _get_json(cfg.bridge_url.rstrip("/") + cfg.runtime_snapshot_endpoint, timeout_sec=6)
+        sections.append(f"- live_runtime_snapshot_summary={_safe_json(_runtime_summary(runtime_payload), 3500)}")
+    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        sections.append(f"- live_runtime_snapshot_error={type(exc).__name__}: {_redact_text(str(exc))}")
 
     events_path = Path(cfg.events_log_path)
     if not events_path.is_absolute():

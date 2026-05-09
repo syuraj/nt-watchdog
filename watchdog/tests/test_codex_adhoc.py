@@ -18,6 +18,7 @@ from watchdog.codex_adhoc import (
     command_available,
     resolve_codex_command,
     run_codex_adhoc,
+    _runtime_summary,
 )
 from watchdog.config import load_config
 
@@ -194,6 +195,18 @@ class CodexRunnerTests(unittest.TestCase):
         self.assertIn("recent_error_like_log_lines", out)
         self.assertIn("<redacted>", out)
         self.assertNotIn("abcdefghijklmnopqrstuvwxyz", out)
+
+    def test_runtime_summary_keeps_account_and_strategy_context(self) -> None:
+        payload = {
+            "accounts": [{"name": "A", "connected": True}],
+            "positions": [{"account": "A", "instrument": "ES"}],
+            "strategy_runtime": {"strategies": [{"name": "S1"}, {"name": "S2"}]},
+            "unrelated": "ignored",
+        }
+        out = _runtime_summary(payload)
+        self.assertEqual(out["accounts"][0]["name"], "A")
+        self.assertEqual(out["positions"][0]["instrument"], "ES")
+        self.assertEqual(out["strategy_runtime"]["count"], 2)
 
 
 class CodexConfigTests(unittest.TestCase):

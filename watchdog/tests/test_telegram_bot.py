@@ -13,6 +13,7 @@ from watchdog.telegram_bot import (
     TelegramBotService,
     TelegramSharedState,
     await_with_typing,
+    build_errors_review_prompt,
     format_commands,
     format_health,
     format_status,
@@ -395,8 +396,22 @@ class FormatCommandsTests(unittest.TestCase):
         out = format_commands()
         self.assertIn("/health", out)
         self.assertIn("/status", out)
+        self.assertIn("/errors", out)
         self.assertIn("/restart", out)
         self.assertNotIn("/help", out)
+
+
+class ErrorsPromptTests(unittest.TestCase):
+    def test_default_prompt_reviews_nt_account_and_watchdog_errors(self) -> None:
+        out = build_errors_review_prompt()
+        self.assertIn("since local midnight yesterday", out)
+        self.assertIn("NinjaTrader", out)
+        self.assertIn("order/account/execution errors", out)
+        self.assertIn("watchdog recovery failures", out)
+
+    def test_prompt_uses_command_args_as_window(self) -> None:
+        out = build_errors_review_prompt("last 6 hours")
+        self.assertIn("last 6 hours", out)
 
 
 class FormatRestartResultTests(unittest.TestCase):

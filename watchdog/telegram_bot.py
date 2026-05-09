@@ -1,4 +1,4 @@
-"""Telegram command bot for watchdog.
+﻿"""Telegram command bot for watchdog.
 
 Runs a python-telegram-bot Application on a dedicated daemon thread with its
 own asyncio event loop. The main watchdog loop publishes health + snapshot
@@ -8,6 +8,7 @@ block on bridge HTTP from the async event loop.
 Commands:
     /health - summary of NT connection + strategy state
     /status - account balance + positions
+    /errors - Codex review of recent NT/account/watchdog errors
     /restart - restart NT and strategies
 """
 
@@ -446,6 +447,7 @@ def format_commands() -> str:
     return (
         "/health  - NT + strategy status\n"
         "/status  - account balance + positions\n"
+        "/errors  - review recent NT/account/watchdog errors\n"
         "/restart - restart NT and all strategies"
     )
 
@@ -480,6 +482,23 @@ async def await_with_typing(
     finally:
         if not task.done():
             task.cancel()
+
+
+def build_errors_review_prompt(args_text: str = "") -> str:
+    window = args_text.strip() or "since local midnight yesterday"
+    return "\n".join(
+        [
+            f"/errors command: review recent NinjaTrader/account/watchdog errors for {window}.",
+            "",
+            "Scope:",
+            "- Check NinjaTrader log errors, exceptions, order/account/execution errors, connection issues, blocking windows, HealthBridge health, watchdog recovery failures, Telegram/send failures, and stale UI/main-thread symptoms.",
+            "- Use prefetched live health/runtime context first, then readable watchdog/NT logs if needed.",
+            "- Separate confirmed current problems from historical resolved events.",
+            "- Include concrete timestamps, log file paths/line references, account names, instruments, order IDs, and endpoint fields when available.",
+            "- If no errors are found, say that clearly and name the scan window/evidence used.",
+            "- Keep the Telegram answer concise.",
+        ]
+    )
 
 
 class TelegramBotService:
@@ -517,6 +536,7 @@ class TelegramBotService:
                     max_reply_chars=config.telegram_adhoc_codex_max_reply_chars,
                     bridge_url=config.bridge_url,
                     health_endpoint=config.health_endpoint,
+                    runtime_snapshot_endpoint=config.runtime_snapshot_endpoint,
                     events_log_path=config.events_log_path,
                 )
             )
@@ -638,6 +658,28 @@ class TelegramBotService:
                 return
             await update.effective_message.reply_text(format_restart_result(result or {}))
 
+        async def cmd_errors(update, context) -> None:  # type: ignore[no-untyped-def]
+            message = update.effective_message
+            if self.codex_queue is None:
+                await message.reply_text("Codex error review is disabled.")
+                return
+            args_text = " ".join(str(part) for part in getattr(context, "args", []) or [])
+            user_id = int(getattr(update.effective_user, "id", 0) or 0)
+
+            async def send_typing() -> None:
+                chat = update.effective_chat
+                if chat is not None:
+                    await context.bot.send_chat_action(
+                        chat_id=chat.id,
+                        action=ChatAction.TYPING,
+                    )
+
+            answer = await await_with_typing(
+                self.codex_queue.ask(user_id, build_errors_review_prompt(args_text)),
+                send_typing,
+            )
+            await message.reply_text(answer)
+
         async def cmd_unknown(update, context) -> None:  # type: ignore[no-untyped-def]
             message = update.effective_message
             text = str(getattr(message, "text", "") or "").strip()
@@ -666,6 +708,7 @@ class TelegramBotService:
         )
         app.add_handler(CommandHandler("health", cmd_health, filters=user_filter))
         app.add_handler(CommandHandler("status", cmd_status, filters=user_filter))
+        app.add_handler(CommandHandler("errors", cmd_errors, filters=user_filter))
         app.add_handler(CommandHandler("restart", cmd_restart, filters=user_filter))
         # Any other text from a whitelisted user (unknown command or plain text)
         # is treated as an ad hoc Codex question. Non-whitelisted users are
@@ -678,6 +721,7 @@ class TelegramBotService:
             await app.bot.set_my_commands([
                 BotCommand("health", "NT + strategy status"),
                 BotCommand("status", "Account balance + positions"),
+                BotCommand("errors", "Review errors"),
                 BotCommand("restart", "Restart NT and strategies"),
             ])
             await app.start()
