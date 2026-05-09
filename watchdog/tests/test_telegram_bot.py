@@ -31,15 +31,20 @@ class FormatHealthTests(unittest.TestCase):
                         {"name": "S1", "is_enabled": True, "state": "Realtime", "account": "SimA"},
                         {"name": "S2", "is_enabled": True, "state": "Realtime", "account": "SimB"},
                     ]
-                }
+                },
+                "accounts": [
+                    {"name": "SimA", "cash": 101000.25},
+                    {"name": "SimB", "cash": 99000.0},
+                ],
             },
         )
         out = format_health(state.snapshot())
         self.assertIn("\U0001F7E2", out)
         self.assertIn("NT connections: 1/1", out)
         self.assertIn("Strategies: 2 active / 2 total", out)
-        self.assertIn("S1 (SimA)", out)
-        self.assertIn("S2 (SimB)", out)
+        self.assertIn("S1 ($101,000.25)", out)
+        self.assertIn("S2 ($99,000.00)", out)
+        self.assertNotIn("S1 (SimA)", out)
         self.assertNotIn("(active)", out)
         self.assertIn("Health: ok", out)
 
@@ -64,14 +69,18 @@ class FormatHealthTests(unittest.TestCase):
                         {"name": "S1", "is_enabled": True, "state": "Realtime", "account": "SimA"},
                         {"name": "S2", "is_enabled": False, "state": "Finalized", "account": "SimB"},
                     ]
-                }
+                },
+                "accounts": [
+                    {"name": "SimA", "cash": 101000.25},
+                    {"name": "SimB", "cash": 99000.0},
+                ],
             },
         )
         out = format_health(state.snapshot())
         self.assertIn("\U0001F7E1 NT connections: 1/1", out)
         self.assertIn("Strategies: 1 active / 2 total", out)
-        self.assertIn("S1 (SimA)", out)
-        self.assertIn("S2 (SimB, off/Finalized)", out)
+        self.assertIn("S1 ($101,000.25)", out)
+        self.assertIn("S2 ($99,000.00, off/Finalized)", out)
 
     def test_missing_fields_render_safely(self) -> None:
         state = TelegramSharedState()

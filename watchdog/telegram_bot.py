@@ -262,6 +262,12 @@ def format_health(state: _SharedSnapshot) -> str:
 
     strat_info = snap.get("strategy_runtime") or {}
     strategies = strat_info.get("strategies") or []
+    accounts = snap.get("accounts") or []
+    cash_by_account = {
+        str(a.get("name") or ""): a.get("cash")
+        for a in accounts
+        if isinstance(a, dict)
+    }
     active = sum(1 for s in strategies if _strategy_is_active(s))
     total_strats = len(strategies)
     any_inactive_strategy = any(not _strategy_is_active(s) for s in strategies)
@@ -279,8 +285,9 @@ def format_health(state: _SharedSnapshot) -> str:
     for s in strategies:
         name = str(s.get("name") or "?")
         account = str(s.get("account") or "?")
+        account_value = _fmt_money(cash_by_account.get(account)) if account in cash_by_account else "?"
         state_str = str(s.get("state") or "")
-        details = [account]
+        details = [account_value]
         if not _strategy_is_active(s):
             status_parts = []
             if not bool(s.get("is_enabled")):
