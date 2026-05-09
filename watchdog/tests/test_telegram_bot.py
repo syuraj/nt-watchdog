@@ -102,8 +102,11 @@ class FormatStatusTests(unittest.TestCase):
         self.assertIn("$49,269.24", out)
         self.assertIn("Today:", out)
         self.assertIn("$114.50", out)
+        self.assertIn("\U0001F7E2 Today:", out)
         self.assertIn("3 closed (2W/1L)", out)
-        self.assertIn("ES 06-26 Long 2 @ $5,000.25", out)
+        self.assertIn("ES 06-26 Long 2 (unreal -$5.50)", out)
+        self.assertNotIn("@ $5,000.25", out)
+        self.assertIn("\U0001F534 ES 06-26", out)
         # Realized/Unrealized account-level line removed.
         self.assertNotIn("Realized:", out)
         self.assertNotIn("Unrealized:", out)
@@ -202,6 +205,19 @@ class FormatStatusTests(unittest.TestCase):
         self.assertIn("Active", out)
         self.assertIn("$125.50", out)
         self.assertIn("0 closed", out)
+
+    def test_negative_daily_pnl_uses_red_dot(self) -> None:
+        state = self._publish(
+            accounts=[
+                {"name": "Active", "connected": True, "cash": 10000.0,
+                 "realized_pnl": 0.0, "unrealized_pnl": 0.0},
+            ],
+            positions=[],
+        )
+        daily = [{"account": "Active", "total_pnl": -25.0, "trades": 1, "wins": 0, "losses": 1}]
+        out = format_status(state.snapshot(), daily)
+        self.assertIn("\U0001F534 Today:", out)
+        self.assertIn("-$25.00", out)
 
     def test_zero_closed_trades_with_executions_still_shows_account(self) -> None:
         state = self._publish(

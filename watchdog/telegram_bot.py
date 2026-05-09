@@ -260,7 +260,7 @@ def format_health(state: _SharedSnapshot) -> str:
     total = conn.get("total", "?")
     connected = conn.get("connected", "?")
 
-    dot = "🟢" if isinstance(connected, int) and connected > 0 and status == "ok" else "🔴"
+    dot = "\U0001F7E2" if isinstance(connected, int) and connected > 0 and status == "ok" else "\U0001F534"
 
     strat_info = snap.get("strategy_runtime") or {}
     strategies = strat_info.get("strategies") or []
@@ -277,7 +277,7 @@ def format_health(state: _SharedSnapshot) -> str:
         marker = "active" if is_on else "off"
         if state_str and state_str.lower() not in {"active", "realtime"}:
             marker = f"{marker}/{state_str}"
-        lines.append(f" • {name} ({marker})")
+        lines.append(f" \u2022 {name} ({marker})")
     lines.append(f"Health: {status}")
     reasons = health.get("reasons") or []
     if isinstance(reasons, list) and reasons:
@@ -297,7 +297,7 @@ def format_status(
     """
     snap = state.runtime_snapshot or {}
     if not snap:
-        return "No snapshot yet — watchdog may still be starting."
+        return "No snapshot yet - watchdog may still be starting."
 
     accounts = snap.get("accounts") or []
     positions = positions_override if positions_override is not None else (snap.get("positions") or [])
@@ -361,15 +361,16 @@ def format_status(
         name = str(acc.get("name") or "?")
         cash = _fmt_money(acc.get("cash"))
         row = pnl_by_account.get(name) or {}
+        total_value = _as_float(row.get("total_pnl"))
         total = _fmt_money(row.get("total_pnl"))
         trades = _as_int(row.get("trades"))
         executions = _as_int(row.get("executions"))
         wins = _as_int(row.get("wins"))
         losses = _as_int(row.get("losses"))
         acc_lines = [
-            f"💰 {name}",
+            f"\U0001F4B0 {name}",
             f"  Cash: {cash}",
-            f"  Today: {total} · {trades} closed ({wins}W/{losses}L)",
+            f"  {_pnl_dot(total_value)} Today: {total} - {trades} closed ({wins}W/{losses}L)",
         ]
         if trades == 0 and executions > 0:
             acc_lines.append(f"  Activity: {executions} executions")
@@ -377,9 +378,9 @@ def format_status(
             instr = str(p.get("instrument") or "?")
             side = str(p.get("side") or "?")
             qty = p.get("quantity", "?")
-            avg = _fmt_money(p.get("avg_price"))
+            unreal_value = _as_float(p.get("unrealized"))
             unreal = _fmt_money(p.get("unrealized"))
-            acc_lines.append(f"  🟢 {instr} {side} {qty} @ {avg} (unreal {unreal})")
+            acc_lines.append(f"  {_pnl_dot(unreal_value)} {instr} {side} {qty} (unreal {unreal})")
         blocks.append("\n".join(acc_lines))
 
     return "\n\n".join(blocks)
@@ -406,6 +407,14 @@ def _fmt_money(val: Any) -> str:
     return f"{sign}${abs(n):,.2f}"
 
 
+def _pnl_dot(val: Any) -> str:
+    try:
+        n = float(val)
+    except (TypeError, ValueError):
+        n = 0.0
+    return "\U0001F534" if n < -0.005 else "\U0001F7E2"
+
+
 def format_commands() -> str:
     return (
         "/health  - NT + strategy status\n"
@@ -418,10 +427,10 @@ def format_restart_result(result: Dict[str, Any]) -> str:
     if result.get("ok"):
         toggled = int(result.get("strategies_toggled", 0) or 0)
         bridge_up = bool(result.get("bridge_up"))
-        bridge_note = "" if bridge_up else " (bridge not yet responsive — strategies enable attempted anyway)"
-        return f"✅ NT restarted. Strategies enabled: {toggled}{bridge_note}"
+        bridge_note = "" if bridge_up else " (bridge not yet responsive - strategies enable attempted anyway)"
+        return f"\u2705 NT restarted. Strategies enabled: {toggled}{bridge_note}"
     err = str(result.get("error", "") or "unknown_error")
-    return f"❌ Restart failed: {err}"
+    return f"\u274c Restart failed: {err}"
 
 
 class TelegramBotService:
@@ -547,16 +556,16 @@ class TelegramBotService:
         async def cmd_restart(update, context) -> None:  # type: ignore[no-untyped-def]
             if self.restart_handler is None:
                 await update.effective_message.reply_text(
-                    "⚠️ /restart not wired (no handler). Check watchdog startup logs."
+                    "\u26a0\ufe0f /restart not wired (no handler). Check watchdog startup logs."
                 )
                 return
             await update.effective_message.reply_text(
-                "🔧 Restart requested. Forcefully shutting NT — may take up to ~2min…"
+                "\U0001F527 Restart requested. Forcefully shutting NT - may take up to ~2min..."
             )
             try:
                 result = await asyncio.to_thread(self.restart_handler)
             except Exception as exc:  # pragma: no cover - defensive
-                await update.effective_message.reply_text(f"❌ Restart failed: {exc!r}")
+                await update.effective_message.reply_text(f"\u274c Restart failed: {exc!r}")
                 return
             await update.effective_message.reply_text(format_restart_result(result or {}))
 
