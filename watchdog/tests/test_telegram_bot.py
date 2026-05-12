@@ -115,8 +115,8 @@ class FormatStatusTests(unittest.TestCase):
         )
         daily = [{"account": "DEMO", "total_pnl": 114.5, "trades": 3, "wins": 2, "losses": 1}]
         out = format_status(state.snapshot(), daily)
-        self.assertIn("DEMO", out)
-        self.assertIn("$49,269.24", out)
+        self.assertIn("DEMO ($49,269.24)", out)
+        self.assertNotIn("Cash:", out)
         self.assertIn("Today:", out)
         self.assertIn("$114.50", out)
         self.assertIn("\U0001F7E2 Today:", out)
@@ -165,7 +165,7 @@ class FormatStatusTests(unittest.TestCase):
         ]
         out = format_status(state.snapshot(), daily)
         self.assertIn("Live", out)
-        self.assertIn("Activity: 1 executions", out)
+        self.assertNotIn("Activity:", out)
         self.assertIn("NQ 06-26 Long 1", out)
         self.assertNotIn("Today:", out)
         self.assertNotIn("$0.00 - 0 closed", out)
@@ -274,7 +274,7 @@ class FormatStatusTests(unittest.TestCase):
         out = format_status(state.snapshot(), daily)
         self.assertIn("Active", out)
         self.assertIn("0 closed", out)
-        self.assertIn("4 executions", out)
+        self.assertNotIn("Activity:", out)
 
     def test_has_activity_today_still_shows_account(self) -> None:
         state = self._publish(
