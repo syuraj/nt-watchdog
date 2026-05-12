@@ -388,14 +388,23 @@ def format_status(
         executions = _as_int(row.get("executions"))
         wins = _as_int(row.get("wins"))
         losses = _as_int(row.get("losses"))
+        account_positions = positions_by_account.get(name, [])
+        has_closed_or_realized_pnl = (
+            trades > 0
+            or abs(total_value) >= 0.005
+            or abs(_as_float(row.get("realized_pnl"))) >= 0.005
+        )
         acc_lines = [
             f"\U0001F4B0 {name}",
             f"  Cash: {cash}",
-            f"  {_pnl_dot(total_value)} Today: {total} - {trades} closed ({wins}W/{losses}L)",
         ]
+        if has_closed_or_realized_pnl or not account_positions:
+            acc_lines.append(
+                f"  {_pnl_dot(total_value)} Today: {total} - {trades} closed ({wins}W/{losses}L)"
+            )
         if trades == 0 and executions > 0:
             acc_lines.append(f"  Activity: {executions} executions")
-        for p in positions_by_account.get(name, []):
+        for p in account_positions:
             instr = str(p.get("instrument") or "?")
             side = str(p.get("side") or "?")
             qty = p.get("quantity", "?")

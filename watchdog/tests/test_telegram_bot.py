@@ -145,7 +145,30 @@ class FormatStatusTests(unittest.TestCase):
         out = format_status(state.snapshot(), [])
         self.assertIn("Live", out)
         self.assertIn("NQ 06-26 Long 1", out)
-        self.assertIn("0 closed", out)
+        self.assertNotIn("Today:", out)
+        self.assertNotIn("$0.00 - 0 closed", out)
+
+    def test_open_position_with_only_opening_execution_hides_zero_daily_pnl(self) -> None:
+        state = self._publish(
+            accounts=[
+                {"name": "Live", "connected": True, "cash": 25000.0,
+                 "realized_pnl": 0.0, "unrealized_pnl": 10.0},
+            ],
+            positions=[
+                {"account": "Live", "instrument": "NQ 06-26", "side": "Long",
+                 "quantity": 1, "avg_price": 20000.0, "unrealized": 10.0},
+            ],
+        )
+        daily = [
+            {"account": "Live", "total_pnl": 0.0, "trades": 0,
+             "executions": 1, "wins": 0, "losses": 0, "has_activity_today": True},
+        ]
+        out = format_status(state.snapshot(), daily)
+        self.assertIn("Live", out)
+        self.assertIn("Activity: 1 executions", out)
+        self.assertIn("NQ 06-26 Long 1", out)
+        self.assertNotIn("Today:", out)
+        self.assertNotIn("$0.00 - 0 closed", out)
 
     def test_positions_override_replaces_cached(self) -> None:
         state = self._publish(
