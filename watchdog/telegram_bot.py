@@ -93,7 +93,8 @@ def load_sqlite_daily_activity(
         "order by a.Name"
     )
     exec_sql = (
-        "select a.Name, e.Instrument, e.Time, e.MarketPosition, e.Price, e.Quantity, mi.PointValue "
+        "select a.Name, e.Instrument, e.Time, e.MarketPosition, e.Price, e.Quantity, "
+        "mi.PointValue, e.Commission, e.Fee "
         "from Executions e "
         "join Accounts a on a.Id = e.Account "
         "join Instruments i on i.Id = e.Instrument "
@@ -149,28 +150,43 @@ def _execution_side(market_position: Any) -> int:
 def _estimate_sqlite_realized_pnl(exec_rows: List[Any], start_ticks: int) -> Dict[str, Dict[str, Any]]:
     lots_by_key: Dict[tuple, List[List[float]]] = {}
     pnl_by_account: Dict[str, Dict[str, Any]] = {}
-    for account, instrument_id, time_ticks, market_position, price, quantity, point_value in exec_rows:
+    for (
+        account,
+        instrument_id,
+        time_ticks,
+        market_position,
+        price,
+        quantity,
+        point_value,
+        commission,
+        fee,
+    ) in exec_rows:
         side = _execution_side(market_position)
         try:
             qty_remaining = int(quantity or 0)
             fill_price = float(price or 0.0)
             multiplier = float(point_value or 1.0)
             ticks = int(time_ticks or 0)
+            execution_cost = float(commission or 0.0) + float(fee or 0.0)
         except (TypeError, ValueError):
             continue
         if not account or side == 0 or qty_remaining <= 0:
             continue
 
+        cost_per_unit = execution_cost / qty_remaining
         signed_remaining = side * qty_remaining
         key = (str(account), instrument_id)
         lots = lots_by_key.setdefault(key, [])
         while signed_remaining and lots and (lots[0][0] > 0) != (signed_remaining > 0):
-            lot_qty, lot_price = lots[0]
+            lot_qty, lot_price, lot_cost = lots[0]
             close_qty = min(abs(lot_qty), abs(signed_remaining))
             if lot_qty > 0:
                 pnl = (fill_price - lot_price) * close_qty * multiplier
             else:
                 pnl = (lot_price - fill_price) * close_qty * multiplier
+            entry_cost = (lot_cost / abs(lot_qty)) * close_qty if lot_qty else 0.0
+            exit_cost = cost_per_unit * close_qty
+            net_pnl = pnl - entry_cost - exit_cost
             if ticks >= start_ticks:
                 row = pnl_by_account.setdefault(
                     str(account),
@@ -181,21 +197,22 @@ def _estimate_sqlite_realized_pnl(exec_rows: List[Any], start_ticks: int) -> Dic
                         "sqlite_losses": 0,
                     },
                 )
-                row["sqlite_realized_pnl"] += pnl
+                row["sqlite_realized_pnl"] += net_pnl
                 row["sqlite_closed_trades"] += 1
-                if pnl > 0:
+                if net_pnl > 0:
                     row["sqlite_wins"] += 1
-                elif pnl < 0:
+                elif net_pnl < 0:
                     row["sqlite_losses"] += 1
 
             if abs(lot_qty) == close_qty:
                 lots.pop(0)
             else:
                 lots[0][0] = lot_qty - (close_qty if lot_qty > 0 else -close_qty)
+                lots[0][2] = lot_cost - entry_cost
             signed_remaining += close_qty if signed_remaining < 0 else -close_qty
 
         if signed_remaining:
-            lots.append([float(signed_remaining), fill_price])
+            lots.append([float(signed_remaining), fill_price, abs(signed_remaining) * cost_per_unit])
     return {
         name: {
             **row,

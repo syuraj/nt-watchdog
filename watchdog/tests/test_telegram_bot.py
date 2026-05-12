@@ -390,16 +390,25 @@ class DailyActivityFallbackTests(unittest.TestCase):
                 con.execute(
                     "create table Executions ("
                     "Id integer primary key, Account integer, Instrument integer, Time integer, "
-                    "MarketPosition integer, Price real, Quantity integer)"
+                    "MarketPosition integer, Price real, Quantity integer, Commission real, Fee real)"
                 )
                 con.execute("insert into Accounts values (1, 'SimA')")
                 con.execute("insert into Accounts values (2, 'Old')")
                 con.execute("insert into MasterInstruments values (1, 20.0)")
                 con.execute("insert into Instruments values (1, 1)")
                 now = datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc).astimezone()
-                con.execute("insert into Executions values (1, 1, 1, ?, 0, 100.0, 1)", (self._ticks(now),))
-                con.execute("insert into Executions values (2, 1, 1, ?, 1, 105.0, 1)", (self._ticks(now.replace(hour=13)),))
-                con.execute("insert into Executions values (3, 2, 1, ?, 0, 100.0, 1)", (self._ticks(now.replace(day=7)),))
+                con.execute(
+                    "insert into Executions values (1, 1, 1, ?, 0, 100.0, 1, 1.25, 0.25)",
+                    (self._ticks(now),),
+                )
+                con.execute(
+                    "insert into Executions values (2, 1, 1, ?, 1, 105.0, 1, 1.25, 0.25)",
+                    (self._ticks(now.replace(hour=13)),),
+                )
+                con.execute(
+                    "insert into Executions values (3, 2, 1, ?, 0, 100.0, 1, 0.0, 0.0)",
+                    (self._ticks(now.replace(day=7)),),
+                )
                 con.commit()
             finally:
                 con.close()
@@ -410,7 +419,7 @@ class DailyActivityFallbackTests(unittest.TestCase):
         self.assertEqual(rows[0]["account"], "SimA")
         self.assertEqual(rows[0]["executions"], 2)
         self.assertTrue(rows[0]["has_activity_today"])
-        self.assertEqual(rows[0]["sqlite_realized_pnl"], 100.0)
+        self.assertEqual(rows[0]["sqlite_realized_pnl"], 97.0)
         self.assertEqual(rows[0]["sqlite_closed_trades"], 1)
 
 
