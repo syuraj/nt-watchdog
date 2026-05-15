@@ -12,6 +12,7 @@ from .bridge_client import BridgeClient
 from .config import WatchdogConfig, load_config
 from .nt_process import NTProcessManager
 from .recovery import RecoveryManager
+from .scheduled_log_scanner import ScheduledLogScanner
 from .scheduled_status import ScheduledStatusSender
 from .state_store import StateStore
 from .telegram_bot import TelegramBotService, TelegramSharedState
@@ -112,6 +113,12 @@ def run_watchdog(config: WatchdogConfig, max_cycles: int = 0) -> None:
     if config.telegram_enabled and config.telegram_bot_token and config.telegram_chat_id:
         print(f"[{_now()}] scheduled status enabled (weekdays 12:30 PM, 4:00 PM)")
 
+    # Start scheduled log scanner
+    log_scanner = ScheduledLogScanner(config=config, notifier=notifier)
+    log_scanner.start()
+    if config.telegram_enabled and config.telegram_bot_token and config.telegram_chat_id:
+        print(f"[{_now()}] scheduled log scanner enabled (every 15 min)")
+
     try:
         started = time.time()
         print(f"[{_now()}] watchdog started. bridge={config.bridge_url}")
@@ -191,6 +198,10 @@ def run_watchdog(config: WatchdogConfig, max_cycles: int = 0) -> None:
                 print(f"[{_now()}] backoff sleep {sleep_sec}s (override)")
             time.sleep(sleep_sec)
     finally:
+        try:
+            log_scanner.stop()
+        except Exception:
+            pass
         try:
             scheduled_status.stop()
         except Exception:
