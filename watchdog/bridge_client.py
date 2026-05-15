@@ -38,38 +38,38 @@ class BridgeClient:
     def safe_health(self) -> Dict[str, Any]:
         try:
             return self.get_json(self.config.health_endpoint, timeout_sec=4)
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError) as exc:
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError, OSError) as exc:
             return {"status": "down", "error": str(exc)}
 
     def safe_runtime_snapshot(self) -> Dict[str, Any]:
         try:
             return self.get_json(self.config.runtime_snapshot_endpoint, timeout_sec=6)
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError) as exc:
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError, OSError) as exc:
             return {"error": str(exc)}
 
     def safe_positions(self, timeout_sec: int = 4) -> List[Dict[str, Any]]:
         try:
             resp = self.get_json("/positions", timeout_sec=timeout_sec)
             return resp if isinstance(resp, list) else []
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError):
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError, OSError):
             return []
 
     def enable_all_strategies(self, timeout_sec: int = 15) -> Dict[str, Any]:
         try:
             return self.post_json("/strategies/enable_all", body={}, timeout_sec=timeout_sec)
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError) as exc:
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError, OSError) as exc:
             return {"method": "uia_keypress", "toggled": 0, "error": str(exc)}
 
     def disable_all_strategies(self, timeout_sec: int = 15) -> Dict[str, Any]:
         try:
             return self.post_json("/strategies/disable_all", body={}, timeout_sec=timeout_sec)
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError) as exc:
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError, OSError) as exc:
             return {"method": "reflection_setstate", "toggled": 0, "count": 0, "error": str(exc)}
 
     def dismiss_blocking_dialogs(self, timeout_sec: int = 10) -> Dict[str, Any]:
         try:
             return self.post_json("/dialogs/dismiss", body={}, timeout_sec=timeout_sec)
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError) as exc:
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError, OSError) as exc:
             return {"dismissed": 0, "clicked": [], "error": str(exc)}
 
 
@@ -85,6 +85,6 @@ class BridgeClient:
             body["connection_names"] = names
         try:
             return self.post_json(endpoint, body=body, timeout_sec=12)
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError) as exc:
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError, OSError) as exc:
             return {"success": False, "error": str(exc), "action": endpoint}
 

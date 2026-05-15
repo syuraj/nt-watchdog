@@ -645,7 +645,10 @@ class TelegramBotService:
 
         async def cmd_health(update, context) -> None:  # type: ignore[no-untyped-def]
             snap = self.shared_state.snapshot()
-            await update.effective_message.reply_text(format_health(snap))
+            try:
+                await update.effective_message.reply_text(format_health(snap))
+            except Exception:
+                pass  # app shutting down, user won't see reply anyway
 
         async def cmd_status(update, context) -> None:  # type: ignore[no-untyped-def]
             snap = self.shared_state.snapshot()
@@ -660,30 +663,48 @@ class TelegramBotService:
                 )
                 daily = merge_daily_activity(sqlite_activity)
                 snap = snapshot_with_runtime(snap, runtime)
-            await update.effective_message.reply_text(
-                format_status(snap, daily, positions_override=positions)
-            )
+            try:
+                await update.effective_message.reply_text(
+                    format_status(snap, daily, positions_override=positions)
+                )
+            except Exception:
+                pass  # app shutting down, user won't see reply anyway
 
         async def cmd_restart(update, context) -> None:  # type: ignore[no-untyped-def]
             if self.restart_handler is None:
-                await update.effective_message.reply_text(
-                    "\u26a0\ufe0f /restart not wired (no handler). Check watchdog startup logs."
-                )
+                try:
+                    await update.effective_message.reply_text(
+                        "\u26a0\ufe0f /restart not wired (no handler). Check watchdog startup logs."
+                    )
+                except Exception:
+                    pass
                 return
-            await update.effective_message.reply_text(
-                "\U0001F527 Restart requested. Forcefully shutting NT - may take up to ~2min..."
-            )
+            try:
+                await update.effective_message.reply_text(
+                    "\U0001F527 Restart requested. Forcefully shutting NT - may take up to ~2min..."
+                )
+            except Exception:
+                pass
             try:
                 result = await asyncio.to_thread(self.restart_handler)
             except Exception as exc:  # pragma: no cover - defensive
-                await update.effective_message.reply_text(f"\u274c Restart failed: {exc!r}")
+                try:
+                    await update.effective_message.reply_text(f"\u274c Restart failed: {exc!r}")
+                except Exception:
+                    pass
                 return
-            await update.effective_message.reply_text(format_restart_result(result or {}))
+            try:
+                await update.effective_message.reply_text(format_restart_result(result or {}))
+            except Exception:
+                pass  # app shutting down, user won't see reply anyway
 
         async def cmd_errors(update, context) -> None:  # type: ignore[no-untyped-def]
             message = update.effective_message
             if self.codex_queue is None:
-                await message.reply_text("Codex error review is disabled.")
+                try:
+                    await message.reply_text("Codex error review is disabled.")
+                except Exception:
+                    pass
                 return
             args_text = " ".join(str(part) for part in getattr(context, "args", []) or [])
             user_id = int(getattr(update.effective_user, "id", 0) or 0)
@@ -700,7 +721,10 @@ class TelegramBotService:
                 self.codex_queue.ask(user_id, build_errors_review_prompt(args_text)),
                 send_typing,
             )
-            await message.reply_text(answer)
+            try:
+                await message.reply_text(answer)
+            except Exception:
+                pass  # app shutting down, user won't see reply anyway
 
         async def cmd_unknown(update, context) -> None:  # type: ignore[no-untyped-def]
             message = update.effective_message
@@ -708,7 +732,10 @@ class TelegramBotService:
             if not text:
                 return
             if self.codex_queue is None:
-                await message.reply_text(format_commands())
+                try:
+                    await message.reply_text(format_commands())
+                except Exception:
+                    pass
                 return
             user_id = int(getattr(update.effective_user, "id", 0) or 0)
 
@@ -721,7 +748,10 @@ class TelegramBotService:
                     )
 
             answer = await await_with_typing(self.codex_queue.ask(user_id, text), send_typing)
-            await message.reply_text(answer)
+            try:
+                await message.reply_text(answer)
+            except Exception:
+                pass  # app shutting down, user won't see reply anyway
 
         app = (
             Application.builder()
