@@ -120,6 +120,7 @@ Key paths:
 
 ## Editing Rules
 
+- **Use existing popular libraries over reinventing the wheel.** For standard problems (scheduling, HTTP clients, parsing, serialization, async patterns), default to well-known libraries. Custom implementations should be rare exceptions when no library fits. Examples: APScheduler for cron, requests for HTTP, standard lib where sufficient. If you catch yourself writing manual datetime math, timers, or protocol handling, ask whether a library already solves it better.
 - Prefer **Python over PowerShell** for new automation. PS scripts in `scripts/` are thin wrappers only.
 - Keep `scripts/manage_watchdog.py` as the main operational CLI.
 - **Do not reintroduce Task Scheduler logic** unless explicitly requested — startup uses user-login launcher, no admin.
