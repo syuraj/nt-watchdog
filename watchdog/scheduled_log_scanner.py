@@ -52,6 +52,7 @@ class ScheduledLogScanner:
         self.last_scan_time = datetime.now() - timedelta(hours=1)
         self.alerted_issues: Set[str] = set()  # Deduplication
         self.alert_cooldown_sec = 1800  # 30 min cooldown per issue type
+        self.nt_log_offsets: Dict[str, int] = {}  # Track read position per file
 
     def start(self) -> None:
         """Start scheduled log scanner."""
@@ -117,14 +118,25 @@ class ScheduledLogScanner:
         if not nt_log_dir.exists():
             return issues
 
-        # Scan log files modified since last scan
-        cutoff = now - timedelta(minutes=20)  # Overlap for safety
         for log_file in nt_log_dir.glob("log.*.txt"):
             try:
-                if datetime.fromtimestamp(log_file.stat().st_mtime) < cutoff:
+                file_key = log_file.name
+                current_size = log_file.stat().st_size
+                last_offset = self.nt_log_offsets.get(file_key, 0)
+
+                # If file smaller than last offset, reset (log rotated)
+                if current_size < last_offset:
+                    last_offset = 0
+
+                # Skip if no new data
+                if current_size == last_offset:
                     continue
 
                 with log_file.open("r", encoding="utf-8", errors="ignore") as f:
+                    # Seek to last read position
+                    f.seek(last_offset)
+
+                    # Scan only new lines
                     for line in f:
                         for pattern, description in URGENT_PATTERNS:
                             if re.search(pattern, line, re.IGNORECASE):
@@ -135,6 +147,10 @@ class ScheduledLogScanner:
                                     "line": line.strip()[:200],
                                     "timestamp": now.isoformat(),
                                 })
+
+                    # Update offset to current position
+                    self.nt_log_offsets[file_key] = f.tell()
+
             except Exception:
                 pass  # Skip unreadable logs
 
@@ -156,8 +172,13 @@ class ScheduledLogScanner:
                 for line in f:
                     try:
                         event = json.loads(line)
+                        # StateStore writes "time_utc", not "timestamp"
+                        timestamp_str = event.get("time_utc") or event.get("timestamp", "")
+                        if not timestamp_str:
+                            continue
+
                         event_time = datetime.fromisoformat(
-                            event.get("timestamp", "").replace("Z", "+00:00")
+                            timestamp_str.replace("Z", "+00:00")
                         )
 
                         if event_time < cutoff:
@@ -169,7 +190,7 @@ class ScheduledLogScanner:
                                 "type": "Alert send failure",
                                 "source": "watchdog_events",
                                 "details": event.get("alert_error", ""),
-                                "timestamp": event.get("timestamp"),
+                                "timestamp": timestamp_str,
                             })
 
                         # Check for repeated recovery failures
@@ -178,7 +199,7 @@ class ScheduledLogScanner:
                                 "type": "Recovery escalation",
                                 "source": "watchdog_events",
                                 "details": "Escalated to NT restart after reconnect failures",
-                                "timestamp": event.get("timestamp"),
+                                "timestamp": timestamp_str,
                             })
 
                         # Check for process start failures
@@ -187,7 +208,7 @@ class ScheduledLogScanner:
                                 "type": "NT startup failure",
                                 "source": "watchdog_events",
                                 "details": event.get("reason", ""),
-                                "timestamp": event.get("timestamp"),
+                                "timestamp": timestamp_str,
                             })
 
                     except (json.JSONDecodeError, ValueError):
