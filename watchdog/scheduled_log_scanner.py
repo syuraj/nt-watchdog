@@ -87,6 +87,9 @@ class ScheduledLogScanner:
         # Scan watchdog event log
         issues.extend(self._scan_watchdog_events(now))
 
+        # Scan watchdog application logs
+        issues.extend(self._scan_watchdog_logs(now))
+
         # Group by type and filter already alerted
         grouped = defaultdict(list)
         for issue in issues:
@@ -215,6 +218,55 @@ class ScheduledLogScanner:
                         pass
         except Exception:
             pass
+
+        return issues
+
+    def _scan_watchdog_logs(self, now: datetime) -> List[Dict[str, Any]]:
+        """Scan watchdog application logs for errors."""
+        issues = []
+        log_dir = Path(self.config.events_log_path).parent
+
+        if not log_dir.exists():
+            return issues
+
+        # Scan all .log files in watchdog/logs/
+        for log_file in log_dir.glob("*.log"):
+            try:
+                file_key = f"watchdog_{log_file.name}"
+                current_size = log_file.stat().st_size
+                last_offset = self.nt_log_offsets.get(file_key, 0)
+
+                # If file smaller than last offset, reset (log rotated)
+                if current_size < last_offset:
+                    last_offset = 0
+
+                # Skip if no new data
+                if current_size == last_offset:
+                    continue
+
+                with log_file.open("r", encoding="utf-8", errors="ignore") as f:
+                    # Seek to last read position
+                    f.seek(last_offset)
+
+                    # Scan only new lines
+                    for line in f:
+                        line_lower = line.lower()
+
+                        # Look for ERROR/CRITICAL/exception patterns
+                        if any(marker in line_lower for marker in ["[error]", "[critical]", "exception", "traceback", "failed to"]):
+                            issues.append({
+                                "type": "Watchdog error",
+                                "source": "watchdog_log",
+                                "file": log_file.name,
+                                "line": line.strip()[:200],
+                                "timestamp": now.isoformat(),
+                            })
+
+                    # Update offset to current position
+                    self.nt_log_offsets[file_key] = f.tell()
+
+            except Exception:
+                pass  # Skip unreadable logs
 
         return issues
 
