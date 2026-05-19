@@ -82,8 +82,8 @@ class FormatHealthTests(unittest.TestCase):
         out = format_health(state.snapshot())
         self.assertIn("\U0001F7E1 NT connections: 1/1", out)
         self.assertIn("Strategies: 1 active / 2 total", out)
-        self.assertIn("S1 ($101,000.25)", out)
-        self.assertIn("S2 ($99,000.00, off/Finalized)", out)
+        self.assertIn("\U0001F7E2 S1 ($101,000.25)", out)
+        self.assertIn("\U0001F534 S2 ($99,000.00, off/Finalized)", out)
 
     def test_strategies_are_sorted_alphabetically(self) -> None:
         state = TelegramSharedState()
@@ -102,13 +102,13 @@ class FormatHealthTests(unittest.TestCase):
         )
 
         lines = format_health(state.snapshot()).splitlines()
-        strategy_lines = [line for line in lines if line.startswith(" \u2022 ")]
+        strategy_lines = [line for line in lines if line.startswith(" \U0001F7E2 ")]
         self.assertEqual(
             strategy_lines,
             [
-                " \u2022 alpha ($100,000.00)",
-                " \u2022 Bravo ($100,000.00)",
-                " \u2022 Zulu ($100,000.00)",
+                " \U0001F7E2 alpha ($100,000.00)",
+                " \U0001F7E2 Bravo ($100,000.00)",
+                " \U0001F7E2 Zulu ($100,000.00)",
             ],
         )
 

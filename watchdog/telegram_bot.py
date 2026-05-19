@@ -308,6 +308,7 @@ def format_health(state: _SharedSnapshot) -> str:
     lines.append(f"{dot} NT connections: {connected}/{total}")
     lines.append(f"Strategies: {active} active / {total_strats} total")
     for s in strategies:
+        strategy_dot = "\U0001F7E2" if _strategy_is_active(s) else "\U0001F534"
         name = str(s.get("name") or "?")
         account = str(s.get("account") or "?")
         account_value = _fmt_money(cash_by_account.get(account)) if account in cash_by_account else "?"
@@ -321,7 +322,7 @@ def format_health(state: _SharedSnapshot) -> str:
                 status_parts.append(state_str)
             if status_parts:
                 details.append("/".join(status_parts))
-        lines.append(f" \u2022 {name} ({', '.join(details)})")
+        lines.append(f" {strategy_dot} {name} ({', '.join(details)})")
     lines.append(f"Health: {status}")
     reasons = health.get("reasons") or []
     if isinstance(reasons, list) and reasons:
