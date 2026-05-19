@@ -1,4 +1,5 @@
 PyYAML
 python-telegram-bot>=21.0,<22.0
 APScheduler>=3.10,<4.0
+pandas-market-calendars>=4.4,<6.0
 

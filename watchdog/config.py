@@ -46,6 +46,11 @@ class WatchdogConfig:
     telegram_adhoc_codex_timeout_sec: int = 120
     telegram_adhoc_codex_queue_max: int = 2
     telegram_adhoc_codex_max_reply_chars: int = 3500
+    daily_report_enabled: bool = True
+    daily_report_time: str = "19:00"
+    daily_report_market_calendar: str = "XNYS"
+    daily_report_require_market_calendar: bool = False
+    daily_report_max_reply_chars: int = 3500
 
 
 def _to_bool(value: str, default: bool) -> bool:
@@ -181,6 +186,23 @@ def load_config(path: str) -> WatchdogConfig:
         cfg,
         "telegram_adhoc_codex_max_reply_chars",
         _to_int(os.getenv("TELEGRAM_ADHOC_CODEX_MAX_REPLY_CHARS"), cfg.telegram_adhoc_codex_max_reply_chars),
+    )
+    _set_if_present(
+        cfg,
+        "daily_report_enabled",
+        _to_bool(os.getenv("DAILY_REPORT_ENABLED"), cfg.daily_report_enabled),
+    )
+    _set_if_present(cfg, "daily_report_time", os.getenv("DAILY_REPORT_TIME"))
+    _set_if_present(cfg, "daily_report_market_calendar", os.getenv("DAILY_REPORT_MARKET_CALENDAR"))
+    _set_if_present(
+        cfg,
+        "daily_report_require_market_calendar",
+        _to_bool(os.getenv("DAILY_REPORT_REQUIRE_MARKET_CALENDAR"), cfg.daily_report_require_market_calendar),
+    )
+    _set_if_present(
+        cfg,
+        "daily_report_max_reply_chars",
+        _to_int(os.getenv("DAILY_REPORT_MAX_REPLY_CHARS"), cfg.daily_report_max_reply_chars),
     )
 
     cfg.bridge_url = cfg.bridge_url.rstrip("/")

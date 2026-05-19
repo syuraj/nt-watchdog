@@ -52,3 +52,13 @@ telegram_adhoc_codex_data_dir: "watchdog/state/codex_adhoc"
 telegram_adhoc_codex_timeout_sec: 120
 telegram_adhoc_codex_queue_max: 2
 telegram_adhoc_codex_max_reply_chars: 3500
+
+# Daily Codex learning report. Runs on weekdays at the configured local time,
+# then skips market holidays/closed sessions when the calendar package is
+# available. The report uses read-only prefetched transactions, logs, and health
+# context; it does not mutate NT or call recovery endpoints.
+daily_report_enabled: true
+daily_report_time: "19:00"
+daily_report_market_calendar: "XNYS"
+daily_report_require_market_calendar: false
+daily_report_max_reply_chars: 3500
