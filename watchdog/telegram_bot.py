@@ -280,7 +280,13 @@ def format_health(state: _SharedSnapshot) -> str:
     connected = conn.get("connected", "?")
 
     strat_info = snap.get("strategy_runtime") or {}
-    strategies = strat_info.get("strategies") or []
+    strategies = sorted(
+        strat_info.get("strategies") or [],
+        key=lambda s: (
+            str(s.get("name") or "").casefold() if isinstance(s, dict) else "",
+            str(s.get("account") or "").casefold() if isinstance(s, dict) else "",
+        ),
+    )
     accounts = snap.get("accounts") or []
     cash_by_account = {
         str(a.get("name") or ""): a.get("cash")

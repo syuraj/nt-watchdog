@@ -85,6 +85,33 @@ class FormatHealthTests(unittest.TestCase):
         self.assertIn("S1 ($101,000.25)", out)
         self.assertIn("S2 ($99,000.00, off/Finalized)", out)
 
+    def test_strategies_are_sorted_alphabetically(self) -> None:
+        state = TelegramSharedState()
+        state.publish(
+            {"status": "ok", "connections": {"total": 1, "connected": 1}},
+            {
+                "strategy_runtime": {
+                    "strategies": [
+                        {"name": "Zulu", "is_enabled": True, "state": "Realtime", "account": "SimA"},
+                        {"name": "alpha", "is_enabled": True, "state": "Realtime", "account": "SimA"},
+                        {"name": "Bravo", "is_enabled": True, "state": "Realtime", "account": "SimA"},
+                    ]
+                },
+                "accounts": [{"name": "SimA", "cash": 100000.0}],
+            },
+        )
+
+        lines = format_health(state.snapshot()).splitlines()
+        strategy_lines = [line for line in lines if line.startswith(" \u2022 ")]
+        self.assertEqual(
+            strategy_lines,
+            [
+                " \u2022 alpha ($100,000.00)",
+                " \u2022 Bravo ($100,000.00)",
+                " \u2022 Zulu ($100,000.00)",
+            ],
+        )
+
     def test_missing_fields_render_safely(self) -> None:
         state = TelegramSharedState()
         # No publish call - snapshot is empty dicts.
