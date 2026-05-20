@@ -5,4 +5,5 @@
 **/.venv/**
 **/logs/**  
 **/state/**
+watchdog/state/notes/**
 .wolf/

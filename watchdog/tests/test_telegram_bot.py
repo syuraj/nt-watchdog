@@ -457,6 +457,8 @@ class FormatCommandsTests(unittest.TestCase):
         self.assertIn("/status", out)
         self.assertIn("/review", out)
         self.assertIn("/errors", out)
+        self.assertIn("/note", out)
+        self.assertIn("/notes", out)
         self.assertIn("/restart", out)
         self.assertNotIn("/help", out)
 

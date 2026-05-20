@@ -10,6 +10,8 @@ Commands:
     /status - account balance + positions
     /review - Codex daily learning report
     /errors - Codex review of recent NT/account/watchdog errors
+    /note - append an operational note
+    /notes - read notes
     /restart - restart NT and strategies
 """
 
@@ -26,6 +28,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from .bridge_client import BridgeClient
 from .codex_adhoc import CodexAdhocConfig, CodexAdhocQueue
 from .config import WatchdogConfig
+from .notes_store import NotesStore, format_notes
 
 
 @dataclass
@@ -479,6 +482,8 @@ def format_commands() -> str:
         "/status  - account balance + positions\n"
         "/review  - daily transaction/log learning report\n"
         "/errors  - review recent NT/account/watchdog errors\n"
+        "/note    - save an operational note\n"
+        "/notes   - show today's notes\n"
         "/restart - restart NT and all strategies"
     )
 
@@ -554,6 +559,7 @@ class TelegramBotService:
         self.shared_state = shared_state
         self.restart_handler = restart_handler
         self.bridge_client = bridge_client
+        self.notes_store = NotesStore(config) if config.notes_enabled else None
         if codex_queue is not None:
             self.codex_queue = codex_queue
         elif config.telegram_adhoc_codex_enabled:
@@ -767,6 +773,51 @@ class TelegramBotService:
             except Exception:
                 pass  # app shutting down, user won't see reply anyway
 
+        async def cmd_note(update, context) -> None:  # type: ignore[no-untyped-def]
+            message = update.effective_message
+            if self.notes_store is None:
+                try:
+                    await message.reply_text("Notes are disabled.")
+                except Exception:
+                    pass
+                return
+            text = " ".join(str(part) for part in getattr(context, "args", []) or []).strip()
+            if not text:
+                try:
+                    await message.reply_text("Usage: /note <text>")
+                except Exception:
+                    pass
+                return
+            user_id = int(getattr(update.effective_user, "id", 0) or 0)
+            try:
+                self.notes_store.append_note(text, user_id=user_id, source="telegram")
+                await message.reply_text("Noted.")
+            except Exception as exc:
+                try:
+                    await message.reply_text(f"Could not save note: {exc}")
+                except Exception:
+                    pass
+
+        async def cmd_notes(update, context) -> None:  # type: ignore[no-untyped-def]
+            message = update.effective_message
+            if self.notes_store is None:
+                try:
+                    await message.reply_text("Notes are disabled.")
+                except Exception:
+                    pass
+                return
+            args_text = " ".join(str(part) for part in getattr(context, "args", []) or []).strip().lower()
+            if args_text not in {"", "today"}:
+                try:
+                    await message.reply_text("Usage: /notes today")
+                except Exception:
+                    pass
+                return
+            try:
+                await message.reply_text(format_notes(self.notes_store.read_notes(), label="today"))
+            except Exception:
+                pass  # app shutting down, user won't see reply anyway
+
         async def cmd_unknown(update, context) -> None:  # type: ignore[no-untyped-def]
             message = update.effective_message
             text = str(getattr(message, "text", "") or "").strip()
@@ -803,6 +854,8 @@ class TelegramBotService:
         app.add_handler(CommandHandler("status", cmd_status, filters=user_filter))
         app.add_handler(CommandHandler("review", cmd_review, filters=user_filter))
         app.add_handler(CommandHandler("errors", cmd_errors, filters=user_filter))
+        app.add_handler(CommandHandler("note", cmd_note, filters=user_filter))
+        app.add_handler(CommandHandler("notes", cmd_notes, filters=user_filter))
         app.add_handler(CommandHandler("restart", cmd_restart, filters=user_filter))
         # Any other text from a whitelisted user (unknown command or plain text)
         # is treated as an ad hoc Codex question. Non-whitelisted users are
@@ -817,6 +870,8 @@ class TelegramBotService:
                 BotCommand("status", "Account balance + positions"),
                 BotCommand("review", "Daily learning report"),
                 BotCommand("errors", "Review errors"),
+                BotCommand("note", "Save note"),
+                BotCommand("notes", "Show notes"),
                 BotCommand("restart", "Restart NT and strategies"),
             ])
             await app.start()

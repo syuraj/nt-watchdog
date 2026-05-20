@@ -36,6 +36,8 @@ Two parts:
    Use `/errors` to run a Codex review of recent NinjaTrader, account/order,
    HealthBridge, and watchdog errors. Use `/review` to trigger the daily
    transaction/log learning report on demand.
+   Use `/note <text>` to append a local operational note, and `/notes today`
+   to read today's notes.
 5. Start watchdog:
    - `python scripts/manage_watchdog.py run`
 
@@ -71,6 +73,7 @@ Scheduled task triggered on TerminalServices Event ID 24 runs `tscon /dest:conso
 - Last good snapshot: `watchdog/state/last_good_snapshot.json`
 - Runtime counters: `watchdog/state/runtime_state.json`
 - Temporary ad hoc Codex handoff directory: `watchdog/state/codex_adhoc`
+- Local Telegram notes: `watchdog/state/notes`
 
 ## Notes
 - NT8 strategy re-enable APIs are limited. Watchdog uses UI automation to toggle strategy checkboxes on the Strategies tab after reconnect; falls back to manual restore request if UIA fails.

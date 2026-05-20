@@ -51,6 +51,9 @@ class WatchdogConfig:
     daily_report_market_calendar: str = "XNYS"
     daily_report_require_market_calendar: bool = False
     daily_report_max_reply_chars: int = 3500
+    notes_enabled: bool = True
+    notes_dir: str = "watchdog/state/notes"
+    notes_max_chars: int = 2000
 
 
 def _to_bool(value: str, default: bool) -> bool:
@@ -204,6 +207,17 @@ def load_config(path: str) -> WatchdogConfig:
         "daily_report_max_reply_chars",
         _to_int(os.getenv("DAILY_REPORT_MAX_REPLY_CHARS"), cfg.daily_report_max_reply_chars),
     )
+    _set_if_present(
+        cfg,
+        "notes_enabled",
+        _to_bool(os.getenv("NOTES_ENABLED"), cfg.notes_enabled),
+    )
+    _set_if_present(cfg, "notes_dir", os.getenv("NOTES_DIR"))
+    _set_if_present(
+        cfg,
+        "notes_max_chars",
+        _to_int(os.getenv("NOTES_MAX_CHARS"), cfg.notes_max_chars),
+    )
 
     cfg.bridge_url = cfg.bridge_url.rstrip("/")
     cfg.connection_names = _to_list(cfg.connection_names, [])
@@ -218,11 +232,15 @@ def load_config(path: str) -> WatchdogConfig:
     cfg.events_log_path = str(events_log_path)
     workdir_path = Path(cfg.telegram_adhoc_codex_workdir or str(base_dir))
     data_dir_path = Path(cfg.telegram_adhoc_codex_data_dir)
+    notes_dir_path = Path(cfg.notes_dir)
     if not workdir_path.is_absolute():
         workdir_path = (base_dir / workdir_path).resolve()
     if not data_dir_path.is_absolute():
         data_dir_path = (base_dir / data_dir_path).resolve()
+    if not notes_dir_path.is_absolute():
+        notes_dir_path = (base_dir / notes_dir_path).resolve()
     cfg.telegram_adhoc_codex_workdir = str(workdir_path)
     cfg.telegram_adhoc_codex_data_dir = str(data_dir_path)
+    cfg.notes_dir = str(notes_dir_path)
     return cfg
 

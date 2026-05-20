@@ -110,6 +110,7 @@ Default bridge port is `8899` (intentionally different from legacy `8888`).
 - `watchdog/telegram_notifier.py` — exposes `last_error` for failure visibility.
 - `watchdog/codex_adhoc.py` — runs whitelisted Telegram plain text / unknown commands through `codex exec` with read-only sandbox, no approval escalation, timeout, queue cap, and capped replies.
 - Telegram `/errors` invokes the same Codex queue with a fixed error-review prompt for recent NT/account/order/HealthBridge/watchdog issues.
+- Telegram `/note` and `/notes today` are wrapper-owned note operations that append/read only `watchdog/state/notes/*.jsonl`; Codex remains read-only.
 
 Key paths:
 
@@ -117,6 +118,7 @@ Key paths:
 - Snapshot: `watchdog/state/last_good_snapshot.json`
 - Runtime counters: `watchdog/state/runtime_state.json`
 - NT logs: `C:\Users\sshrestha\Documents\NinjaTrader 8\log\log.*.txt`
+- Local notes: `watchdog/state/notes/YYYY-MM-DD.jsonl` (runtime state, gitignored)
 
 ## Editing Rules
 
@@ -127,6 +129,7 @@ Key paths:
 - Keep `status` concise by default; detail behind `--verbose` / `--json`.
 - Alert send failures must be visible in both terminal output and event log.
 - Telegram ad hoc Codex handling must stay read-only and operationally scoped. Do not allow it to edit files, recompile NinjaScript, restart NT, install packages, mutate databases, call recovery endpoints, or expose secrets.
+- Note-taking is the only allowed Telegram write path outside recovery actions: keep it limited to appending/reading `watchdog/state/notes/*.jsonl`, cap note length, redact obvious secrets, and keep notes gitignored.
 - **In `HealthBridge.cs`, always prefer reflection** over hardcoded NT API calls. NT8 internals vary across versions; reflection keeps the bridge resilient when NT changes a type or method signature. Fall back to direct calls only when reflection is genuinely infeasible.
 - **`HealthBridge.cs` stays minimal — health + recovery only.** Do not add strategy-development, backtesting, strategy-source, compile-queueing, or diagnostic endpoints (strategies/SA/windows lists) to this AddOn. Those live in a separate strategy-dev AddOn. If tempted to add new endpoints, check whether they belong there instead. Keep this bridge's surface area small so it's cheap to audit and slow to break.
 

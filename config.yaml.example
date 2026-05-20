@@ -62,3 +62,8 @@ daily_report_time: "19:00"
 daily_report_market_calendar: "XNYS"
 daily_report_require_market_calendar: false
 daily_report_max_reply_chars: 3500
+
+# Telegram note taking. Notes are local runtime state and are gitignored.
+notes_enabled: true
+notes_dir: "watchdog/state/notes"
+notes_max_chars: 2000
