@@ -34,7 +34,8 @@ Two parts:
    as ad hoc Codex questions. Those runs use a read-only Codex sandbox, no
    approval escalation, a timeout, and a capped reply.
    Use `/errors` to run a Codex review of recent NinjaTrader, account/order,
-   HealthBridge, and watchdog errors.
+   HealthBridge, and watchdog errors. Use `/review` to trigger the daily
+   transaction/log learning report on demand.
 5. Start watchdog:
    - `python scripts/manage_watchdog.py run`
 

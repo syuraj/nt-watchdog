@@ -8,6 +8,7 @@ block on bridge HTTP from the async event loop.
 Commands:
     /health - summary of NT connection + strategy state
     /status - account balance + positions
+    /review - Codex daily learning report
     /errors - Codex review of recent NT/account/watchdog errors
     /restart - restart NT and strategies
 """
@@ -476,6 +477,7 @@ def format_commands() -> str:
     return (
         "/health  - NT + strategy status\n"
         "/status  - account balance + positions\n"
+        "/review  - daily transaction/log learning report\n"
         "/errors  - review recent NT/account/watchdog errors\n"
         "/restart - restart NT and all strategies"
     )
@@ -733,6 +735,38 @@ class TelegramBotService:
             except Exception:
                 pass  # app shutting down, user won't see reply anyway
 
+        async def cmd_review(update, context) -> None:  # type: ignore[no-untyped-def]
+            message = update.effective_message
+            if self.codex_queue is None:
+                try:
+                    await message.reply_text("Codex daily review is disabled.")
+                except Exception:
+                    pass
+                return
+            from .scheduled_daily_report import build_daily_report_question
+
+            user_id = int(getattr(update.effective_user, "id", 0) or 0)
+
+            async def send_typing() -> None:
+                chat = update.effective_chat
+                if chat is not None:
+                    await context.bot.send_chat_action(
+                        chat_id=chat.id,
+                        action=ChatAction.TYPING,
+                    )
+
+            question = await asyncio.to_thread(
+                build_daily_report_question,
+                self.config,
+                None,
+                market_reason="manual_telegram",
+            )
+            answer = await await_with_typing(self.codex_queue.ask(user_id, question), send_typing)
+            try:
+                await message.reply_text("Daily learning report\n\n" + answer)
+            except Exception:
+                pass  # app shutting down, user won't see reply anyway
+
         async def cmd_unknown(update, context) -> None:  # type: ignore[no-untyped-def]
             message = update.effective_message
             text = str(getattr(message, "text", "") or "").strip()
@@ -767,6 +801,7 @@ class TelegramBotService:
         )
         app.add_handler(CommandHandler("health", cmd_health, filters=user_filter))
         app.add_handler(CommandHandler("status", cmd_status, filters=user_filter))
+        app.add_handler(CommandHandler("review", cmd_review, filters=user_filter))
         app.add_handler(CommandHandler("errors", cmd_errors, filters=user_filter))
         app.add_handler(CommandHandler("restart", cmd_restart, filters=user_filter))
         # Any other text from a whitelisted user (unknown command or plain text)
@@ -780,6 +815,7 @@ class TelegramBotService:
             await app.bot.set_my_commands([
                 BotCommand("health", "NT + strategy status"),
                 BotCommand("status", "Account balance + positions"),
+                BotCommand("review", "Daily learning report"),
                 BotCommand("errors", "Review errors"),
                 BotCommand("restart", "Restart NT and strategies"),
             ])

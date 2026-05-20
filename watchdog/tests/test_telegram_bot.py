@@ -455,6 +455,7 @@ class FormatCommandsTests(unittest.TestCase):
         out = format_commands()
         self.assertIn("/health", out)
         self.assertIn("/status", out)
+        self.assertIn("/review", out)
         self.assertIn("/errors", out)
         self.assertIn("/restart", out)
         self.assertNotIn("/help", out)

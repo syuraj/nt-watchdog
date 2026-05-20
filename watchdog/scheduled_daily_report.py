@@ -205,6 +205,40 @@ def build_daily_report_context(
     return _truncate("\n".join(sections), max_chars)
 
 
+def build_daily_report_question(
+    config: WatchdogConfig,
+    now: Optional[datetime] = None,
+    *,
+    market_reason: str = "manual",
+) -> str:
+    local_now = now.astimezone() if now is not None else datetime.now().astimezone()
+    return "\n".join(
+        [
+            build_daily_report_prompt(local_now.strftime("%Y-%m-%d")),
+            "",
+            "Prefetched daily context:",
+            build_daily_report_context(config, local_now),
+            "",
+            f"Market-day gate: {market_reason}",
+        ]
+    )
+
+
+def build_daily_report_codex_config(config: WatchdogConfig) -> CodexAdhocConfig:
+    return CodexAdhocConfig(
+        command=config.telegram_adhoc_codex_command,
+        workdir=config.telegram_adhoc_codex_workdir,
+        data_dir=config.telegram_adhoc_codex_data_dir,
+        timeout_sec=config.telegram_adhoc_codex_timeout_sec,
+        queue_max=config.telegram_adhoc_codex_queue_max,
+        max_reply_chars=config.daily_report_max_reply_chars,
+        bridge_url=config.bridge_url,
+        health_endpoint=config.health_endpoint,
+        runtime_snapshot_endpoint=config.runtime_snapshot_endpoint,
+        events_log_path=config.events_log_path,
+    )
+
+
 class ScheduledDailyReportSender:
     def __init__(
         self,
@@ -251,30 +285,8 @@ class ScheduledDailyReportSender:
         if not should_run:
             return
 
-        cfg = CodexAdhocConfig(
-            command=self.config.telegram_adhoc_codex_command,
-            workdir=self.config.telegram_adhoc_codex_workdir,
-            data_dir=self.config.telegram_adhoc_codex_data_dir,
-            timeout_sec=self.config.telegram_adhoc_codex_timeout_sec,
-            queue_max=self.config.telegram_adhoc_codex_queue_max,
-            max_reply_chars=self.config.daily_report_max_reply_chars,
-            bridge_url=self.config.bridge_url,
-            health_endpoint=self.config.health_endpoint,
-            runtime_snapshot_endpoint=self.config.runtime_snapshot_endpoint,
-            events_log_path=self.config.events_log_path,
-        )
-        context = build_daily_report_context(self.config, now)
-        prompt = build_daily_report_prompt(now.strftime("%Y-%m-%d"))
-        question = "\n".join(
-            [
-                prompt,
-                "",
-                "Prefetched daily context:",
-                context,
-                "",
-                f"Market-day gate: {reason}",
-            ]
-        )
+        cfg = build_daily_report_codex_config(self.config)
+        question = build_daily_report_question(self.config, now, market_reason=reason)
         answer = self.codex_runner(cfg, question)
         message = "Daily learning report\n\n" + cap_reply(answer, self.config.daily_report_max_reply_chars)
         self.notifier.send_message(message)
@@ -291,10 +303,12 @@ def _query_execution_rows(
     i_cols = _columns(con, "Instruments")
     mi_cols = _columns(con, "MasterInstruments")
     join_master = "MasterInstrument" in i_cols and bool(mi_cols)
-    join_orders = "Order" in e_cols and bool(o_cols)
+    order_join = _order_join_clause(e_cols, o_cols)
+    join_orders = bool(order_join)
 
     select_parts = [
         _select_existing(e_cols, "e", "Id", "execution_id"),
+        _select_existing(e_cols, "e", "Instrument", "instrument_id"),
         _select_existing(e_cols, "e", "Time", "time_ticks"),
         _select_existing(e_cols, "e", "MarketPosition", "market_position"),
         _select_existing(e_cols, "e", "Price", "price"),
@@ -307,12 +321,16 @@ def _query_execution_rows(
         select_parts.append("i.FullName as instrument")
     elif "Name" in i_cols:
         select_parts.append("i.Name as instrument")
+    elif join_master and "Name" in mi_cols:
+        select_parts.append("mi.Name as instrument")
     else:
         select_parts.append("e.Instrument as instrument")
     if join_master and "Name" in mi_cols:
         select_parts.append("mi.Name as master_instrument")
     if join_orders and "Name" in o_cols:
         select_parts.append("o.Name as order_name")
+    if join_orders and "OrderId" in o_cols:
+        select_parts.append("o.OrderId as order_id")
     if join_orders and "OrderAction" in o_cols:
         select_parts.append("o.OrderAction as order_action")
     if join_orders and "OrderState" in o_cols:
@@ -325,7 +343,7 @@ def _query_execution_rows(
     if join_master:
         joins.append("left join MasterInstruments mi on mi.Id = i.MasterInstrument")
     if join_orders:
-        joins.append("left join Orders o on o.Id = e.[Order]")
+        joins.append(order_join)
 
     sql = (
         "select "
@@ -348,6 +366,18 @@ def _select_existing(columns: set[str], alias: str, column: str, out_name: str) 
     if column not in columns:
         return f"null as {out_name}"
     return f"{alias}.[{column}] as {out_name}"
+
+
+def _order_join_clause(execution_columns: set[str], order_columns: set[str]) -> str:
+    if not order_columns:
+        return ""
+    if "Order" in execution_columns and "Id" in order_columns:
+        return "left join Orders o on o.Id = e.[Order]"
+    if "OrderId" in execution_columns and "OrderId" in order_columns:
+        return "left join Orders o on o.OrderId = e.OrderId"
+    if "OrderId" in execution_columns and "Id" in order_columns:
+        return "left join Orders o on o.Id = e.OrderId"
+    return ""
 
 
 def _ticks_to_local_iso(value: Any) -> str:

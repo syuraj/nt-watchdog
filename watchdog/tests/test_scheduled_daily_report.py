@@ -9,6 +9,7 @@ from unittest import mock
 from watchdog.config import WatchdogConfig, load_config
 from watchdog.scheduled_daily_report import (
     ScheduledDailyReportSender,
+    build_daily_report_question,
     build_daily_report_prompt,
     is_market_session_day,
     load_daily_transactions,
@@ -92,6 +93,56 @@ class DailyTransactionsTests(unittest.TestCase):
         self.assertEqual(out["by_instrument"]["NQ 06-26"]["quantity"], 1)
         self.assertEqual(out["executions"][0]["order_name"], "GapOrbEntry")
 
+    def test_load_daily_transactions_uses_master_name_and_order_id_join(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "NinjaTrader.sqlite"
+            import sqlite3
+
+            con = sqlite3.connect(db_path)
+            try:
+                con.executescript(
+                    """
+                    create table Accounts (Id integer primary key, Name text);
+                    create table MasterInstruments (Id integer primary key, Name text);
+                    create table Instruments (Id integer primary key, MasterInstrument integer);
+                    create table Orders (OrderId text primary key, Name text, OrderAction integer, OrderState integer);
+                    create table Executions (
+                        Id integer primary key,
+                        Account integer,
+                        Instrument integer,
+                        OrderId text,
+                        Time integer,
+                        MarketPosition integer,
+                        Price real,
+                        Quantity integer,
+                        Commission real,
+                        Fee real
+                    );
+                    """
+                )
+                con.execute("insert into Accounts values (1, 'Sim')")
+                con.execute("insert into MasterInstruments values (7, 'NQ')")
+                con.execute("insert into Instruments values (42, 7)")
+                con.execute("insert into Orders values ('ord-1', 'NqHitterEntry', 0, 2)")
+                now = datetime(2026, 5, 19, 19, 0, tzinfo=timezone.utc)
+                con.execute(
+                    "insert into Executions values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (1, 1, 42, "ord-1", _dotnet_ticks(now), 0, 21000.25, 1, 2.5, 0.0),
+                )
+                con.commit()
+            finally:
+                con.close()
+
+            out = load_daily_transactions(db_path, now=now)
+
+        self.assertEqual(out["count"], 1)
+        self.assertIn("NQ", out["by_instrument"])
+        self.assertNotIn("42", out["by_instrument"])
+        self.assertEqual(out["executions"][0]["instrument"], "NQ")
+        self.assertEqual(out["executions"][0]["instrument_id"], 42)
+        self.assertEqual(out["executions"][0]["order_name"], "NqHitterEntry")
+        self.assertEqual(out["executions"][0]["order_id"], "ord-1")
+
 
 class ScheduledDailyReportSenderTests(unittest.TestCase):
     def test_send_report_skips_closed_market_day(self) -> None:
@@ -142,6 +193,22 @@ class ScheduledDailyReportSenderTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("prefetched context", calls[0])
         self.assertIn("Market-day gate: market_open:test", calls[0])
+
+    def test_manual_review_question_builds_daily_context_without_market_skip(self) -> None:
+        cfg = WatchdogConfig()
+        with mock.patch(
+            "watchdog.scheduled_daily_report.build_daily_report_context",
+            return_value="prefetched context",
+        ):
+            out = build_daily_report_question(
+                cfg,
+                datetime(2026, 5, 19, 19, 0, tzinfo=timezone.utc),
+                market_reason="manual_telegram",
+            )
+
+        self.assertIn("Daily report: analyze 2026-05-19", out)
+        self.assertIn("prefetched context", out)
+        self.assertIn("Market-day gate: manual_telegram", out)
 
 
 class DailyReportConfigTests(unittest.TestCase):
