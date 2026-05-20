@@ -10,7 +10,7 @@ import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -41,6 +41,13 @@ URGENT_PATTERNS = [
     (r"bridge.*unresponsive", "Bridge unresponsive"),
 ]
 
+NT_LOG_TIMESTAMP_RE = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2}) "
+    r"(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2}):(?P<millis>\d{3})\|"
+)
+RECENT_LOG_WINDOW_MINUTES = 20
+NT_LOG_RECENT_WINDOW = timedelta(minutes=RECENT_LOG_WINDOW_MINUTES)
+
 
 class ScheduledLogScanner:
     """Scans logs periodically for urgent issues."""
@@ -61,6 +68,8 @@ class ScheduledLogScanner:
 
         if not self.config.telegram_bot_token or not self.config.telegram_chat_id:
             return
+
+        self._initialize_nt_log_offsets()
 
         # Scan every 15 minutes
         self.scheduler.add_job(
@@ -116,12 +125,14 @@ class ScheduledLogScanner:
     def _scan_nt_logs(self, now: datetime) -> List[Dict[str, Any]]:
         """Scan NinjaTrader log files for errors."""
         issues = []
-        nt_log_dir = Path.home() / "Documents" / "NinjaTrader 8" / "log"
+        nt_log_dir = self._nt_log_dir()
 
         if not nt_log_dir.exists():
             return issues
 
-        for log_file in nt_log_dir.glob("log.*.txt"):
+        cutoff = now - NT_LOG_RECENT_WINDOW
+
+        for log_file in self._iter_nt_log_files(nt_log_dir):
             try:
                 file_key = log_file.name
                 current_size = log_file.stat().st_size
@@ -141,6 +152,9 @@ class ScheduledLogScanner:
 
                     # Scan only new lines
                     for line in f:
+                        log_time = _parse_nt_log_time(line)
+                        if log_time is None or log_time < cutoff or log_time > now + timedelta(minutes=1):
+                            continue
                         for pattern, description in URGENT_PATTERNS:
                             if re.search(pattern, line, re.IGNORECASE):
                                 issues.append({
@@ -158,6 +172,27 @@ class ScheduledLogScanner:
                 pass  # Skip unreadable logs
 
         return issues
+
+    def _initialize_nt_log_offsets(self) -> None:
+        """Treat existing NT logs as already read when the scanner starts."""
+        nt_log_dir = self._nt_log_dir()
+        if not nt_log_dir.exists():
+            return
+        for log_file in self._iter_nt_log_files(nt_log_dir):
+            try:
+                self.nt_log_offsets[log_file.name] = log_file.stat().st_size
+            except OSError:
+                continue
+
+    def _iter_nt_log_files(self, nt_log_dir: Path) -> List[Path]:
+        return sorted(
+            path
+            for path in nt_log_dir.glob("log.*.txt")
+            if not path.name.endswith(".en.txt")
+        )
+
+    def _nt_log_dir(self) -> Path:
+        return Path.home() / "Documents" / "NinjaTrader 8" / "log"
 
     def _scan_watchdog_events(self, now: datetime) -> List[Dict[str, Any]]:
         """Scan watchdog event log for failures."""
@@ -288,7 +323,7 @@ class ScheduledLogScanner:
 
         # Build alert message
         header = f"🚨 Log Scanner Alert: {issue_type}\n"
-        header += f"Found {count} occurrence(s) in last 15 min\n\n"
+        header += f"Found {count} occurrence(s) in last {RECENT_LOG_WINDOW_MINUTES} min\n\n"
 
         # Include sample details (up to 3)
         samples = []
@@ -310,3 +345,21 @@ class ScheduledLogScanner:
 
         # Send alert
         self.notifier.send_message(message)
+
+
+def _parse_nt_log_time(line: str) -> Optional[datetime]:
+    match = NT_LOG_TIMESTAMP_RE.match(line)
+    if not match:
+        return None
+    try:
+        return datetime(
+            int(match.group("date")[0:4]),
+            int(match.group("date")[5:7]),
+            int(match.group("date")[8:10]),
+            int(match.group("hour")),
+            int(match.group("minute")),
+            int(match.group("second")),
+            int(match.group("millis")) * 1000,
+        )
+    except ValueError:
+        return None
