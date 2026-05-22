@@ -749,7 +749,7 @@ class TelegramBotService:
                 except Exception:
                     pass
                 return
-            from .scheduled_daily_report import build_daily_report_question
+            from .scheduled_daily_report import build_daily_report_question, format_daily_report_message
 
             user_id = int(getattr(update.effective_user, "id", 0) or 0)
 
@@ -768,8 +768,27 @@ class TelegramBotService:
                 market_reason="manual_telegram",
             )
             answer = await await_with_typing(self.codex_queue.ask(user_id, question), send_typing)
+            footer = ""
+            if self.notes_store is not None:
+                try:
+                    saved = self.notes_store.append_review_action_items(
+                        answer,
+                        user_id=user_id,
+                        source="telegram /review",
+                    )
+                    count = int(saved.get("items") or 0)
+                    if count > 0:
+                        footer = f"\U0001F4DD Saved {count} action item(s) to notes.md"
+                except Exception as exc:
+                    footer = f"\u26a0\ufe0f Could not save action items to notes.md: {exc}"
             try:
-                await message.reply_text("Daily learning report\n\n" + answer)
+                await message.reply_text(
+                    format_daily_report_message(
+                        answer,
+                        self.config.daily_report_max_reply_chars,
+                        footer=footer,
+                    )
+                )
             except Exception:
                 pass  # app shutting down, user won't see reply anyway
 

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from watchdog.config import WatchdogConfig, load_config
-from watchdog.notes_store import NotesStore, format_notes
+from watchdog.notes_store import NotesStore, extract_action_items, format_notes
 
 
 class NotesStoreTests(unittest.TestCase):
@@ -71,6 +71,50 @@ class NotesStoreTests(unittest.TestCase):
         self.assertIn("12:30Z", out)
         self.assertIn("review slippage", out)
 
+    def test_extract_action_items_from_daily_report(self) -> None:
+        out = extract_action_items(
+            "\n".join(
+                [
+                    "\U0001F4B8 Transaction learnings",
+                    "- one trade",
+                    "",
+                    "\u2705 Action items",
+                    "- Tighten the VolBreakout stop.",
+                    "2. Backtest a time filter.",
+                    "",
+                    "\U0001F4DD Notes",
+                    "- ignore",
+                ]
+            )
+        )
+
+        self.assertEqual(out, ["Tighten the VolBreakout stop.", "Backtest a time filter."])
+
+    def test_append_review_action_items_writes_notes_md(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = WatchdogConfig(
+                notes_dir=str(Path(tmp) / "notes"),
+                notes_markdown_path=str(Path(tmp) / "notes.md"),
+                notes_max_chars=2000,
+            )
+            store = NotesStore(
+                cfg,
+                now_provider=lambda: datetime(2026, 5, 20, 12, 30, tzinfo=timezone.utc),
+            )
+
+            result = store.append_review_action_items(
+                "\u2705 Action items\n- Review NQ stop width\n- Validate news filter",
+                user_id=42,
+                source="telegram /review",
+            )
+            text = (Path(tmp) / "notes.md").read_text(encoding="utf-8")
+
+        self.assertEqual(result["items"], 2)
+        self.assertIn("Review action items", text)
+        self.assertIn("source=telegram /review, user_id=42", text)
+        self.assertIn("- Review NQ stop width", text)
+        self.assertIn("- Validate news filter", text)
+
     def test_load_config_resolves_notes_settings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg_path = Path(tmp) / "config.yaml"
@@ -79,6 +123,7 @@ class NotesStoreTests(unittest.TestCase):
                     [
                         "notes_enabled: false",
                         "notes_dir: runtime/notes",
+                        "notes_markdown_path: runtime/notes.md",
                         "notes_max_chars: 100",
                     ]
                 ),
@@ -97,7 +142,9 @@ class NotesStoreTests(unittest.TestCase):
         self.assertTrue(cfg.notes_enabled)
         self.assertEqual(cfg.notes_max_chars, 75)
         self.assertTrue(Path(cfg.notes_dir).is_absolute())
+        self.assertTrue(Path(cfg.notes_markdown_path).is_absolute())
         self.assertTrue(str(cfg.notes_dir).endswith(str(Path("runtime") / "notes")))
+        self.assertTrue(str(cfg.notes_markdown_path).endswith(str(Path("runtime") / "notes.md")))
 
 
 if __name__ == "__main__":

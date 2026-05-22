@@ -11,6 +11,7 @@ from watchdog.scheduled_daily_report import (
     ScheduledDailyReportSender,
     build_daily_report_question,
     build_daily_report_prompt,
+    format_daily_report_message,
     is_market_session_day,
     load_daily_transactions,
     parse_report_time,
@@ -40,9 +41,18 @@ class DailyReportHelpersTests(unittest.TestCase):
 
     def test_prompt_requests_transactions_errors_and_strategy_improvements(self) -> None:
         prompt = build_daily_report_prompt("2026-05-19")
+        self.assertIn("\U0001F4B8 Transaction learnings", prompt)
+        self.assertIn("\U0001F6E0\ufe0f Strategy improvement ideas", prompt)
+        self.assertIn("\u26a0\ufe0f NT/watchdog issues", prompt)
+        self.assertIn("\u2705 Action items", prompt)
         self.assertIn("Transaction learnings", prompt)
         self.assertIn("Strategy improvement ideas", prompt)
         self.assertIn("NT/watchdog issues", prompt)
+        self.assertIn("short bullets", prompt)
+
+    def test_format_daily_report_message_adds_emoji_header_and_footer(self) -> None:
+        out = format_daily_report_message("body", 3500, footer="\U0001F4DD saved")
+        self.assertEqual(out, "\U0001F4CA Daily learning report\n\nbody\n\n\U0001F4DD saved")
 
 
 class DailyTransactionsTests(unittest.TestCase):
@@ -189,7 +199,7 @@ class ScheduledDailyReportSenderTests(unittest.TestCase):
         ):
             sender._send_report()
 
-        self.assertEqual(notifier.messages, ["Daily learning report\n\nreport body"])
+        self.assertEqual(notifier.messages, ["\U0001F4CA Daily learning report\n\nreport body"])
         self.assertEqual(len(calls), 1)
         self.assertIn("prefetched context", calls[0])
         self.assertIn("Market-day gate: market_open:test", calls[0])

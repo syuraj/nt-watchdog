@@ -30,6 +30,7 @@ from .telegram_notifier import TelegramNotifier
 
 
 CodexReportRunner = Callable[[CodexAdhocConfig, str], str]
+DAILY_REPORT_TITLE = "\U0001F4CA Daily learning report"
 
 
 def parse_report_time(value: str) -> Tuple[int, int]:
@@ -73,19 +74,33 @@ def build_daily_report_prompt(window_label: str = "today") -> str:
         [
             f"Daily report: analyze {window_label}'s NinjaTrader trading day.",
             "",
-            "Produce a concise Telegram-ready report with these sections:",
-            "1. Transaction learnings: summarize what today's fills/closed trades suggest.",
-            "2. Strategy improvement ideas: name concrete strategy or signal improvements suggested by transaction behavior, but label hypotheses clearly.",
-            "3. NT/watchdog issues: summarize confirmed NinjaTrader, HealthBridge, account/order, connection, and watchdog problems from logs and health context.",
-            "4. Action items: give practical next steps, separating verified issues from ideas needing backtest/runtime validation.",
+            "Produce a concise, easy-to-scan Telegram-ready report.",
+            "Use emoji section headers exactly like this:",
+            "1. \U0001F4B8 Transaction learnings: summarize what today's fills/closed trades suggest.",
+            "2. \U0001F6E0\ufe0f Strategy improvement ideas: name concrete strategy or signal improvements suggested by transaction behavior, but label hypotheses clearly.",
+            "3. \u26a0\ufe0f NT/watchdog issues: summarize confirmed NinjaTrader, HealthBridge, account/order, connection, and watchdog problems from logs and health context.",
+            "4. \u2705 Action items: give practical next steps, separating verified issues from ideas needing backtest/runtime validation.",
             "",
             "Rules:",
             "- Base claims on the prefetched transaction/log/health context first.",
             "- Include account, instrument, strategy/order names, timestamps, and PnL/trade counts when present.",
             "- If context is thin or Codex cannot infer a strategy cause, say that instead of guessing.",
+            "- Prefer short bullets with blank lines between sections; avoid dense paragraphs.",
+            "- Use emojis as section/status markers only, not at the start of every sentence.",
             "- Keep the answer concise enough for Telegram.",
         ]
     )
+
+
+def format_daily_report_message(
+    answer: str,
+    max_reply_chars: int,
+    *,
+    footer: str = "",
+) -> str:
+    footer_text = ("\n\n" + footer.strip()) if footer.strip() else ""
+    body_budget = max(500, int(max_reply_chars or 3500) - len(DAILY_REPORT_TITLE) - len(footer_text) - 2)
+    return DAILY_REPORT_TITLE + "\n\n" + cap_reply(answer, body_budget) + footer_text
 
 
 def load_daily_transactions(
@@ -288,7 +303,7 @@ class ScheduledDailyReportSender:
         cfg = build_daily_report_codex_config(self.config)
         question = build_daily_report_question(self.config, now, market_reason=reason)
         answer = self.codex_runner(cfg, question)
-        message = "Daily learning report\n\n" + cap_reply(answer, self.config.daily_report_max_reply_chars)
+        message = format_daily_report_message(answer, self.config.daily_report_max_reply_chars)
         self.notifier.send_message(message)
 
 

@@ -53,6 +53,7 @@ class WatchdogConfig:
     daily_report_max_reply_chars: int = 3500
     notes_enabled: bool = True
     notes_dir: str = "watchdog/state/notes"
+    notes_markdown_path: str = "watchdog/state/notes.md"
     notes_max_chars: int = 2000
 
 
@@ -213,6 +214,7 @@ def load_config(path: str) -> WatchdogConfig:
         _to_bool(os.getenv("NOTES_ENABLED"), cfg.notes_enabled),
     )
     _set_if_present(cfg, "notes_dir", os.getenv("NOTES_DIR"))
+    _set_if_present(cfg, "notes_markdown_path", os.getenv("NOTES_MARKDOWN_PATH"))
     _set_if_present(
         cfg,
         "notes_max_chars",
@@ -233,14 +235,18 @@ def load_config(path: str) -> WatchdogConfig:
     workdir_path = Path(cfg.telegram_adhoc_codex_workdir or str(base_dir))
     data_dir_path = Path(cfg.telegram_adhoc_codex_data_dir)
     notes_dir_path = Path(cfg.notes_dir)
+    notes_markdown_path = Path(cfg.notes_markdown_path)
     if not workdir_path.is_absolute():
         workdir_path = (base_dir / workdir_path).resolve()
     if not data_dir_path.is_absolute():
         data_dir_path = (base_dir / data_dir_path).resolve()
     if not notes_dir_path.is_absolute():
         notes_dir_path = (base_dir / notes_dir_path).resolve()
+    if not notes_markdown_path.is_absolute():
+        notes_markdown_path = (base_dir / notes_markdown_path).resolve()
     cfg.telegram_adhoc_codex_workdir = str(workdir_path)
     cfg.telegram_adhoc_codex_data_dir = str(data_dir_path)
     cfg.notes_dir = str(notes_dir_path)
+    cfg.notes_markdown_path = str(notes_markdown_path)
     return cfg
 
