@@ -63,6 +63,49 @@ class NotesStore:
                 out.append(item)
         return out
 
+    def read_review_action_items(
+        self,
+        day: Optional[date] = None,
+        *,
+        max_items: int = 50,
+    ) -> List[Dict[str, Any]]:
+        target = day or datetime.now().astimezone().date()
+        path = self.notes_markdown_path
+        if not path.exists():
+            return []
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return []
+
+        out: List[Dict[str, Any]] = []
+        current_day: Optional[date] = None
+        current_time = ""
+        for raw in lines:
+            line = raw.strip()
+            header = re.match(r"^##\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})", line)
+            if header:
+                try:
+                    current_day = date.fromisoformat(header.group(1))
+                except ValueError:
+                    current_day = None
+                current_time = header.group(2)
+                continue
+            if current_day != target:
+                continue
+            if not line.startswith("- "):
+                continue
+            text = line[2:].strip()
+            if text:
+                out.append(
+                    {
+                        "time_label": current_time or "time?",
+                        "source": "telegram_review",
+                        "text": text,
+                    }
+                )
+        return out[-max(1, int(max_items)) :]
+
     def path_for_date(self, day: date) -> Path:
         return self.notes_dir / f"{day.isoformat()}.jsonl"
 
@@ -105,8 +148,9 @@ def format_notes(notes: List[Dict[str, Any]], *, label: str = "today") -> str:
     lines = [f"Notes for {label}:"]
     for item in notes:
         stamp = str(item.get("time_utc") or "")
+        time_label = str(item.get("time_label") or "")
         text = str(item.get("text") or "")
-        time_part = stamp[11:16] + "Z" if len(stamp) >= 16 else "time?"
+        time_part = time_label or (stamp[11:16] + "Z" if len(stamp) >= 16 else "time?")
         lines.append(f"- {time_part} {text}")
     return "\n".join(lines)
 

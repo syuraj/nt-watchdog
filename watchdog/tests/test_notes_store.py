@@ -115,6 +115,55 @@ class NotesStoreTests(unittest.TestCase):
         self.assertIn("- Review NQ stop width", text)
         self.assertIn("- Validate news filter", text)
 
+    def test_read_review_action_items_reads_today_from_notes_md(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = WatchdogConfig(
+                notes_dir=str(Path(tmp) / "notes"),
+                notes_markdown_path=str(Path(tmp) / "notes.md"),
+                notes_max_chars=2000,
+            )
+            notes_md = Path(cfg.notes_markdown_path)
+            notes_md.write_text(
+                "\n".join(
+                    [
+                        "## 2026-05-19 10:04 EDT",
+                        "_Review action items (source=telegram /review)_",
+                        "",
+                        "- Old item",
+                        "",
+                        "## 2026-05-20 12:30 EDT",
+                        "_Review action items (source=telegram /review)_",
+                        "",
+                        "- Review NQ stop width",
+                        "- Validate news filter",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            store = NotesStore(
+                cfg,
+                now_provider=lambda: datetime(2026, 5, 20, 13, 0, tzinfo=timezone.utc),
+            )
+
+            items = store.read_review_action_items(datetime(2026, 5, 20, tzinfo=timezone.utc).date())
+
+        self.assertEqual([item["text"] for item in items], ["Review NQ stop width", "Validate news filter"])
+        self.assertEqual(items[0]["time_label"], "12:30")
+
+    def test_format_notes_includes_review_action_item_time_label(self) -> None:
+        out = format_notes(
+            [
+                {
+                    "time_label": "12:30",
+                    "text": "Review NQ stop width",
+                }
+            ],
+            label="today",
+        )
+
+        self.assertIn("- 12:30 Review NQ stop width", out)
+
     def test_load_config_resolves_notes_settings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg_path = Path(tmp) / "config.yaml"

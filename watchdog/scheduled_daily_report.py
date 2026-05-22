@@ -87,6 +87,7 @@ def build_daily_report_prompt(window_label: str = "today") -> str:
             "- If context is thin or Codex cannot infer a strategy cause, say that instead of guessing.",
             "- Prefer short bullets with blank lines between sections; avoid dense paragraphs.",
             "- Use emojis as section/status markers only, not at the start of every sentence.",
+            "- Do not wrap symbols, paths, order names, fields, or values in backticks; Telegram receives this as plain text.",
             "- Keep the answer concise enough for Telegram.",
         ]
     )
@@ -100,7 +101,11 @@ def format_daily_report_message(
 ) -> str:
     footer_text = ("\n\n" + footer.strip()) if footer.strip() else ""
     body_budget = max(500, int(max_reply_chars or 3500) - len(DAILY_REPORT_TITLE) - len(footer_text) - 2)
-    return DAILY_REPORT_TITLE + "\n\n" + cap_reply(answer, body_budget) + footer_text
+    return DAILY_REPORT_TITLE + "\n\n" + cap_reply(_telegram_plain_text(answer), body_budget) + footer_text
+
+
+def _telegram_plain_text(text: str) -> str:
+    return str(text or "").replace("```", "").replace("`", "")
 
 
 def load_daily_transactions(

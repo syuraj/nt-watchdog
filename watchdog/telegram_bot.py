@@ -833,7 +833,9 @@ class TelegramBotService:
                     pass
                 return
             try:
-                await message.reply_text(format_notes(self.notes_store.read_notes(), label="today"))
+                notes = self.notes_store.read_notes()
+                notes.extend(self.notes_store.read_review_action_items())
+                await message.reply_text(format_notes(notes, label="today"))
             except Exception:
                 pass  # app shutting down, user won't see reply anyway
 

@@ -49,10 +49,15 @@ class DailyReportHelpersTests(unittest.TestCase):
         self.assertIn("Strategy improvement ideas", prompt)
         self.assertIn("NT/watchdog issues", prompt)
         self.assertIn("short bullets", prompt)
+        self.assertIn("Do not wrap", prompt)
 
     def test_format_daily_report_message_adds_emoji_header_and_footer(self) -> None:
         out = format_daily_report_message("body", 3500, footer="\U0001F4DD saved")
         self.assertEqual(out, "\U0001F4CA Daily learning report\n\nbody\n\n\U0001F4DD saved")
+
+    def test_format_daily_report_message_strips_markdown_backticks(self) -> None:
+        out = format_daily_report_message("Review `NQ` and ```logs```", 3500)
+        self.assertEqual(out, "\U0001F4CA Daily learning report\n\nReview NQ and logs")
 
 
 class DailyTransactionsTests(unittest.TestCase):
