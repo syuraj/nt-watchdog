@@ -156,9 +156,25 @@ class NotesStore:
         clean_items = [item for item in clean_items if item]
         if not clean_items:
             return {"path": str(self.notes_markdown_path), "items": 0}
+        existing_review_items = {
+            _normalize_note_text(str(item.get("text") or ""))
+            for item in self.read_recent_notes(days=7, max_items=500)
+            if str(item.get("source") or "").lower() in {"review", "telegram_review"}
+        }
+        deduped_items: List[str] = []
+        skipped = 0
+        for item in clean_items:
+            key = _normalize_note_text(item)
+            if key in existing_review_items:
+                skipped += 1
+                continue
+            existing_review_items.add(key)
+            deduped_items.append(item)
+        if not deduped_items:
+            return {"path": str(self.notes_markdown_path), "items": 0, "skipped": skipped}
 
-        self._append_markdown_items(clean_items, local_now=local_now, source_label="review")
-        return {"path": str(self.notes_markdown_path), "items": len(clean_items)}
+        self._append_markdown_items(deduped_items, local_now=local_now, source_label="review")
+        return {"path": str(self.notes_markdown_path), "items": len(deduped_items), "skipped": skipped}
 
     def _append_markdown_items(
         self,
@@ -215,6 +231,10 @@ def _format_note_time(stamp: str, time_label: str, date_label: str) -> str:
     if time_label:
         return time_label
     return "time?"
+
+
+def _normalize_note_text(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip().casefold())
 
 
 def extract_action_items(report_text: str) -> List[str]:

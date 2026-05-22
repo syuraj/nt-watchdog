@@ -26,9 +26,12 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from .bridge_client import BridgeClient
-from .codex_adhoc import CodexAdhocConfig, CodexAdhocQueue
+from .codex_adhoc import CodexAdhocConfig, CodexAdhocQueue, cap_reply
 from .config import WatchdogConfig
 from .notes_store import NotesStore, format_notes
+
+
+NOTES_REPLY_MAX_CHARS = 3900
 
 
 @dataclass
@@ -488,6 +491,11 @@ def format_commands() -> str:
     )
 
 
+def format_notes_reply(notes: List[Dict[str, Any]], *, label: str = "last 7 days") -> str:
+    newest_first = list(reversed(notes))
+    return cap_reply(format_notes(newest_first, label=label), NOTES_REPLY_MAX_CHARS)
+
+
 def format_restart_result(result: Dict[str, Any]) -> str:
     if result.get("ok"):
         toggled = int(result.get("strategies_toggled", 0) or 0)
@@ -779,6 +787,8 @@ class TelegramBotService:
                     count = int(saved.get("items") or 0)
                     if count > 0:
                         footer = f"\U0001F4DD Saved {count} action item(s) to notes.md"
+                    elif int(saved.get("skipped") or 0) > 0:
+                        footer = "\U0001F4DD No new action items; already in notes.md"
                 except Exception as exc:
                     footer = f"\u26a0\ufe0f Could not save action items to notes.md: {exc}"
             try:
@@ -833,7 +843,7 @@ class TelegramBotService:
                     pass
                 return
             try:
-                await message.reply_text(format_notes(self.notes_store.read_recent_notes(), label="last 7 days"))
+                await message.reply_text(format_notes_reply(self.notes_store.read_recent_notes()))
             except Exception:
                 pass  # app shutting down, user won't see reply anyway
 

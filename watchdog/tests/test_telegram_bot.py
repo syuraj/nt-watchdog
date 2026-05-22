@@ -16,6 +16,7 @@ from watchdog.telegram_bot import (
     build_errors_review_prompt,
     format_commands,
     format_health,
+    format_notes_reply,
     format_status,
     load_sqlite_daily_activity,
     merge_daily_activity,
@@ -461,6 +462,56 @@ class FormatCommandsTests(unittest.TestCase):
         self.assertIn("/notes", out)
         self.assertIn("/restart", out)
         self.assertNotIn("/help", out)
+
+
+class FormatNotesReplyTests(unittest.TestCase):
+    def test_notes_reply_shows_newest_first(self) -> None:
+        notes = [
+            {
+                "date_label": "2026-05-19",
+                "time_label": "12:30",
+                "text": "older note",
+            },
+            {
+                "date_label": "2026-05-20",
+                "time_label": "12:30",
+                "text": "newer note",
+            },
+        ]
+
+        out = format_notes_reply(notes)
+
+        self.assertLess(out.find("newer note"), out.find("older note"))
+
+    def test_caps_notes_reply_below_telegram_limit(self) -> None:
+        notes = [
+            {
+                "date_label": "2026-05-20",
+                "time_label": "12:30",
+                "text": "x" * 500,
+            }
+            for _ in range(20)
+        ]
+
+        out = format_notes_reply(notes)
+
+        self.assertLessEqual(len(out), 3900)
+        self.assertIn("truncated", out)
+
+    def test_notes_reply_cap_preserves_newest_notes(self) -> None:
+        notes = [
+            {
+                "date_label": "2026-05-20",
+                "time_label": "12:30",
+                "text": f"old-{i} " + ("x" * 500),
+            }
+            for i in range(20)
+        ]
+
+        out = format_notes_reply(notes)
+
+        self.assertIn("old-19", out)
+        self.assertNotIn("old-0", out)
 
 
 class ErrorsPromptTests(unittest.TestCase):

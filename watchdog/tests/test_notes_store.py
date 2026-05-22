@@ -130,6 +130,32 @@ class NotesStoreTests(unittest.TestCase):
         self.assertIn("[review] Review NQ stop width", text)
         self.assertIn("[review] Validate news filter", text)
 
+    def test_append_review_action_items_skips_existing_review_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = WatchdogConfig(
+                notes_dir=str(Path(tmp) / "notes"),
+                notes_markdown_path=str(Path(tmp) / "notes.md"),
+                notes_max_chars=2000,
+            )
+            store = NotesStore(
+                cfg,
+                now_provider=lambda: datetime(2026, 5, 20, 12, 30, tzinfo=timezone.utc),
+            )
+
+            first = store.append_review_action_items(
+                "\u2705 Action items\n- Review NQ stop width\n- Validate news filter"
+            )
+            second = store.append_review_action_items(
+                "\u2705 Action items\n-  review nq stop width  \n- Add open-risk check"
+            )
+            text = Path(cfg.notes_markdown_path).read_text(encoding="utf-8")
+
+        self.assertEqual(first["items"], 2)
+        self.assertEqual(second["items"], 1)
+        self.assertEqual(second["skipped"], 1)
+        self.assertEqual(text.lower().count("review nq stop width"), 1)
+        self.assertIn("Add open-risk check", text)
+
     def test_read_markdown_notes_reads_today_from_notes_md(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = WatchdogConfig(
