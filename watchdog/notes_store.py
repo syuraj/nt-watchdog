@@ -213,21 +213,33 @@ def format_notes(notes: List[Dict[str, Any]], *, label: str = "today") -> str:
     if not notes:
         return f"No notes for {label}."
     lines = [f"Notes for {label}:"]
+    current_date = ""
     for item in notes:
         stamp = str(item.get("time_utc") or "")
         time_label = str(item.get("time_label") or "")
         date_label = str(item.get("date_label") or "")
         text = str(item.get("text") or "")
-        time_part = _format_note_time(stamp, time_label, date_label)
+        note_date = _format_note_date(stamp, date_label)
+        if note_date != current_date:
+            lines.append("")
+            lines.append(note_date)
+            current_date = note_date
+        time_part = _format_note_time(stamp, time_label)
         lines.append(f"- {time_part} {text}")
     return "\n".join(lines)
 
 
-def _format_note_time(stamp: str, time_label: str, date_label: str) -> str:
-    if date_label and time_label:
-        return f"{date_label} {time_label}"
+def _format_note_date(stamp: str, date_label: str) -> str:
+    if date_label:
+        return date_label
+    if len(stamp) >= 10:
+        return stamp[:10]
+    return "Unknown date"
+
+
+def _format_note_time(stamp: str, time_label: str) -> str:
     if len(stamp) >= 16:
-        return f"{stamp[:10]} {stamp[11:16]}Z"
+        return f"{stamp[11:16]}Z"
     if time_label:
         return time_label
     return "time?"

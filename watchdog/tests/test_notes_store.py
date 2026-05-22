@@ -84,7 +84,8 @@ class NotesStoreTests(unittest.TestCase):
         )
 
         self.assertIn("Notes for today", out)
-        self.assertIn("2026-05-20 12:30Z", out)
+        self.assertIn("\n2026-05-20\n", out)
+        self.assertIn("- 12:30Z review slippage", out)
         self.assertIn("review slippage", out)
 
     def test_extract_action_items_from_daily_report(self) -> None:
@@ -245,7 +246,35 @@ class NotesStoreTests(unittest.TestCase):
             label="last 7 days",
         )
 
-        self.assertIn("- 2026-05-20 12:30 Review NQ stop width", out)
+        self.assertIn("\n2026-05-20\n", out)
+        self.assertIn("- 12:30 Review NQ stop width", out)
+
+    def test_format_notes_groups_multiple_days(self) -> None:
+        out = format_notes(
+            [
+                {
+                    "date_label": "2026-05-20",
+                    "time_label": "12:30",
+                    "text": "newer note",
+                },
+                {
+                    "date_label": "2026-05-20",
+                    "time_label": "12:20",
+                    "text": "same day note",
+                },
+                {
+                    "date_label": "2026-05-19",
+                    "time_label": "15:00",
+                    "text": "older note",
+                },
+            ],
+            label="last 7 days",
+        )
+
+        self.assertEqual(out.count("2026-05-20"), 1)
+        self.assertEqual(out.count("2026-05-19"), 1)
+        self.assertLess(out.find("2026-05-20"), out.find("newer note"))
+        self.assertLess(out.find("2026-05-19"), out.find("older note"))
 
     def test_read_recent_notes_returns_last_7_days_from_notes_md_and_legacy_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
