@@ -85,7 +85,7 @@ class NotesStoreTests(unittest.TestCase):
 
         self.assertIn("Notes for today", out)
         self.assertIn("\n2026-05-20\n", out)
-        self.assertIn("- 12:30Z review slippage", out)
+        self.assertIn("- review slippage", out)
         self.assertIn("review slippage", out)
 
     def test_extract_action_items_from_daily_report(self) -> None:
@@ -232,7 +232,7 @@ class NotesStoreTests(unittest.TestCase):
             label="today",
         )
 
-        self.assertIn("- 12:30 Review NQ stop width", out)
+        self.assertIn("- Review NQ stop width", out)
 
     def test_format_notes_includes_review_action_item_date_and_time_label(self) -> None:
         out = format_notes(
@@ -247,7 +247,7 @@ class NotesStoreTests(unittest.TestCase):
         )
 
         self.assertIn("\n2026-05-20\n", out)
-        self.assertIn("- 12:30 Review NQ stop width", out)
+        self.assertIn("- Review NQ stop width", out)
 
     def test_format_notes_groups_multiple_days(self) -> None:
         out = format_notes(

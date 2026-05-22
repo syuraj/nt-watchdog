@@ -224,8 +224,7 @@ def format_notes(notes: List[Dict[str, Any]], *, label: str = "today") -> str:
             lines.append("")
             lines.append(note_date)
             current_date = note_date
-        time_part = _format_note_time(stamp, time_label)
-        lines.append(f"- {time_part} {text}")
+        lines.append(f"- {text}")
     return "\n".join(lines)
 
 
@@ -235,14 +234,6 @@ def _format_note_date(stamp: str, date_label: str) -> str:
     if len(stamp) >= 10:
         return stamp[:10]
     return "Unknown date"
-
-
-def _format_note_time(stamp: str, time_label: str) -> str:
-    if len(stamp) >= 16:
-        return f"{stamp[11:16]}Z"
-    if time_label:
-        return time_label
-    return "time?"
 
 
 def _normalize_note_text(text: str) -> str:
