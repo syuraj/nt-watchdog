@@ -11,25 +11,37 @@ from watchdog.notes_store import NotesStore, extract_action_items, format_notes
 
 
 class NotesStoreTests(unittest.TestCase):
-    def test_append_note_writes_jsonl_and_read_notes_returns_today(self) -> None:
+    def test_append_note_writes_notes_md_and_read_markdown_notes_returns_today(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = WatchdogConfig(notes_dir=str(Path(tmp) / "notes"), notes_max_chars=2000)
+            cfg = WatchdogConfig(
+                notes_dir=str(Path(tmp) / "notes"),
+                notes_markdown_path=str(Path(tmp) / "notes.md"),
+                notes_max_chars=2000,
+            )
             store = NotesStore(
                 cfg,
                 now_provider=lambda: datetime(2026, 5, 20, 12, 30, tzinfo=timezone.utc),
             )
 
             item = store.append_note("watch NQ breakout after 10am", user_id=42)
-            notes = store.read_notes(datetime(2026, 5, 20, tzinfo=timezone.utc).date())
+            notes = store.read_markdown_notes(datetime(2026, 5, 20, tzinfo=timezone.utc).date())
+            text = Path(cfg.notes_markdown_path).read_text(encoding="utf-8")
 
         self.assertEqual(item["text"], "watch NQ breakout after 10am")
         self.assertEqual(item["user_id"], 42)
+        self.assertEqual(item["path"], str(Path(tmp) / "notes.md"))
         self.assertEqual(len(notes), 1)
-        self.assertEqual(notes[0]["source"], "telegram")
+        self.assertEqual(notes[0]["source"], "note")
+        self.assertIn("## 2026-05-20", text)
+        self.assertIn("[note] watch NQ breakout after 10am", text)
 
     def test_append_note_redacts_secrets_and_caps_length(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = WatchdogConfig(notes_dir=str(Path(tmp) / "notes"), notes_max_chars=40)
+            cfg = WatchdogConfig(
+                notes_dir=str(Path(tmp) / "notes"),
+                notes_markdown_path=str(Path(tmp) / "notes.md"),
+                notes_max_chars=40,
+            )
             store = NotesStore(
                 cfg,
                 now_provider=lambda: datetime(2026, 5, 20, 12, 30, tzinfo=timezone.utc),
@@ -43,7 +55,11 @@ class NotesStoreTests(unittest.TestCase):
 
     def test_append_note_uses_local_day_for_note_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = WatchdogConfig(notes_dir=str(Path(tmp) / "notes"), notes_max_chars=2000)
+            cfg = WatchdogConfig(
+                notes_dir=str(Path(tmp) / "notes"),
+                notes_markdown_path=str(Path(tmp) / "notes.md"),
+                notes_max_chars=2000,
+            )
             eastern_evening = timezone(timedelta(hours=-4))
             store = NotesStore(
                 cfg,
@@ -51,10 +67,10 @@ class NotesStoreTests(unittest.TestCase):
             )
 
             store.append_note("after close note")
+            text = Path(cfg.notes_markdown_path).read_text(encoding="utf-8")
 
-            notes_dir = Path(cfg.notes_dir)
-            self.assertTrue((notes_dir / "2026-05-19.jsonl").exists())
-            self.assertFalse((notes_dir / "2026-05-20.jsonl").exists())
+            self.assertIn("## 2026-05-19", text)
+            self.assertNotIn("## 2026-05-20", text)
 
     def test_format_notes(self) -> None:
         out = format_notes(
@@ -68,7 +84,7 @@ class NotesStoreTests(unittest.TestCase):
         )
 
         self.assertIn("Notes for today", out)
-        self.assertIn("12:30Z", out)
+        self.assertIn("2026-05-20 12:30Z", out)
         self.assertIn("review slippage", out)
 
     def test_extract_action_items_from_daily_report(self) -> None:
@@ -110,12 +126,11 @@ class NotesStoreTests(unittest.TestCase):
             text = (Path(tmp) / "notes.md").read_text(encoding="utf-8")
 
         self.assertEqual(result["items"], 2)
-        self.assertIn("Review action items", text)
-        self.assertIn("source=telegram /review, user_id=42", text)
-        self.assertIn("- Review NQ stop width", text)
-        self.assertIn("- Validate news filter", text)
+        self.assertIn("## 2026-05-20", text)
+        self.assertIn("[review] Review NQ stop width", text)
+        self.assertIn("[review] Validate news filter", text)
 
-    def test_read_review_action_items_reads_today_from_notes_md(self) -> None:
+    def test_read_markdown_notes_reads_today_from_notes_md(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = WatchdogConfig(
                 notes_dir=str(Path(tmp) / "notes"),
@@ -131,12 +146,41 @@ class NotesStoreTests(unittest.TestCase):
                         "",
                         "- Old item",
                         "",
-                        "## 2026-05-20 12:30 EDT",
-                        "_Review action items (source=telegram /review)_",
+                        "## 2026-05-20",
                         "",
-                        "- Review NQ stop width",
-                        "- Validate news filter",
+                        "- 12:30 [note] Review NQ stop width",
+                        "- 12:31 [review] Validate news filter",
                         "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            store = NotesStore(
+                cfg,
+                now_provider=lambda: datetime(2026, 5, 20, 13, 0, tzinfo=timezone.utc),
+            )
+
+            items = store.read_markdown_notes(datetime(2026, 5, 20, tzinfo=timezone.utc).date())
+
+        self.assertEqual([item["text"] for item in items], ["Review NQ stop width", "Validate news filter"])
+        self.assertEqual(items[0]["time_label"], "12:30")
+        self.assertEqual(items[0]["source"], "note")
+        self.assertEqual(items[1]["source"], "review")
+
+    def test_read_review_action_items_keeps_review_items_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = WatchdogConfig(
+                notes_dir=str(Path(tmp) / "notes"),
+                notes_markdown_path=str(Path(tmp) / "notes.md"),
+                notes_max_chars=2000,
+            )
+            Path(cfg.notes_markdown_path).write_text(
+                "\n".join(
+                    [
+                        "## 2026-05-20",
+                        "",
+                        "- 12:30 [note] manual note",
+                        "- 12:31 [review] Review action",
                     ]
                 ),
                 encoding="utf-8",
@@ -148,8 +192,7 @@ class NotesStoreTests(unittest.TestCase):
 
             items = store.read_review_action_items(datetime(2026, 5, 20, tzinfo=timezone.utc).date())
 
-        self.assertEqual([item["text"] for item in items], ["Review NQ stop width", "Validate news filter"])
-        self.assertEqual(items[0]["time_label"], "12:30")
+        self.assertEqual([item["text"] for item in items], ["Review action"])
 
     def test_format_notes_includes_review_action_item_time_label(self) -> None:
         out = format_notes(
@@ -163,6 +206,61 @@ class NotesStoreTests(unittest.TestCase):
         )
 
         self.assertIn("- 12:30 Review NQ stop width", out)
+
+    def test_format_notes_includes_review_action_item_date_and_time_label(self) -> None:
+        out = format_notes(
+            [
+                {
+                    "date_label": "2026-05-20",
+                    "time_label": "12:30",
+                    "text": "Review NQ stop width",
+                }
+            ],
+            label="last 7 days",
+        )
+
+        self.assertIn("- 2026-05-20 12:30 Review NQ stop width", out)
+
+    def test_read_recent_notes_returns_last_7_days_from_notes_md_and_legacy_jsonl(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = WatchdogConfig(
+                notes_dir=str(Path(tmp) / "notes"),
+                notes_markdown_path=str(Path(tmp) / "notes.md"),
+                notes_max_chars=2000,
+            )
+            notes_dir = Path(cfg.notes_dir)
+            notes_dir.mkdir(parents=True)
+            (notes_dir / "2026-05-13.jsonl").write_text(
+                '{"text": "old legacy note", "time_utc": "2026-05-13T12:00:00Z"}\n',
+                encoding="utf-8",
+            )
+            (notes_dir / "2026-05-14.jsonl").write_text(
+                '{"text": "legacy manual note", "time_utc": "2026-05-14T12:00:00Z"}\n',
+                encoding="utf-8",
+            )
+            Path(cfg.notes_markdown_path).write_text(
+                "\n".join(
+                    [
+                        "## 2026-05-20",
+                        "",
+                        "- 12:30 [note] Manual markdown note",
+                        "- 12:31 [review] Review action",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            store = NotesStore(
+                cfg,
+                now_provider=lambda: datetime(2026, 5, 20, 13, 0, tzinfo=timezone.utc),
+            )
+
+            notes = store.read_recent_notes(days=7)
+
+        self.assertEqual(
+            [item["text"] for item in notes],
+            ["legacy manual note", "Manual markdown note", "Review action"],
+        )
 
     def test_load_config_resolves_notes_settings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

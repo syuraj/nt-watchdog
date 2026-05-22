@@ -483,7 +483,7 @@ def format_commands() -> str:
         "/review  - daily transaction/log learning report\n"
         "/errors  - review recent NT/account/watchdog errors\n"
         "/note    - save an operational note\n"
-        "/notes   - show today's notes\n"
+        "/notes   - show last 7 days of notes\n"
         "/restart - restart NT and all strategies"
     )
 
@@ -826,16 +826,14 @@ class TelegramBotService:
                     pass
                 return
             args_text = " ".join(str(part) for part in getattr(context, "args", []) or []).strip().lower()
-            if args_text not in {"", "today"}:
+            if args_text not in {"", "7d", "week"}:
                 try:
-                    await message.reply_text("Usage: /notes today")
+                    await message.reply_text("Usage: /notes")
                 except Exception:
                     pass
                 return
             try:
-                notes = self.notes_store.read_notes()
-                notes.extend(self.notes_store.read_review_action_items())
-                await message.reply_text(format_notes(notes, label="today"))
+                await message.reply_text(format_notes(self.notes_store.read_recent_notes(), label="last 7 days"))
             except Exception:
                 pass  # app shutting down, user won't see reply anyway
 

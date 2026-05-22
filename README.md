@@ -37,8 +37,8 @@ Two parts:
    HealthBridge, and watchdog errors. Use `/review` to trigger the daily
    transaction/log learning report on demand and append extracted action items
    to `watchdog/state/notes.md`.
-   Use `/note <text>` to append a local operational note, and `/notes today`
-   to read today's notes.
+   Use `/note <text>` to append a local operational note to the same file, and
+   `/notes` to read the last 7 days.
 5. Start watchdog:
    - `python scripts/manage_watchdog.py run`
 
@@ -74,8 +74,8 @@ Scheduled task triggered on TerminalServices Event ID 24 runs `tscon /dest:conso
 - Last good snapshot: `watchdog/state/last_good_snapshot.json`
 - Runtime counters: `watchdog/state/runtime_state.json`
 - Temporary ad hoc Codex handoff directory: `watchdog/state/codex_adhoc`
-- Local Telegram notes: `watchdog/state/notes`
-- Review action items: `watchdog/state/notes.md`
+- Local Telegram notes and review action items: `watchdog/state/notes.md`
+- Legacy per-day note JSONL files, if present: `watchdog/state/notes`
 
 ## Notes
 - NT8 strategy re-enable APIs are limited. Watchdog uses UI automation to toggle strategy checkboxes on the Strategies tab after reconnect; falls back to manual restore request if UIA fails.

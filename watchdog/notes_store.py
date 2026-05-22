@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -34,18 +34,18 @@ class NotesStore:
         now = observed_now.astimezone(timezone.utc)
         item: Dict[str, Any] = {
             "time_utc": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "date_label": local_now.date().isoformat(),
+            "time_label": local_now.strftime("%H:%M"),
             "user_id": int(user_id or 0),
             "source": source,
             "text": clean,
+            "path": str(self.notes_markdown_path),
         }
-        path = self.path_for_date(local_now.date())
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8", newline="\n") as fh:
-            fh.write(json.dumps(item, sort_keys=True, ensure_ascii=False) + "\n")
+        self._append_markdown_items([clean], local_now=local_now, source_label="note")
         return item
 
     def read_notes(self, day: Optional[date] = None, *, max_items: int = 50) -> List[Dict[str, Any]]:
-        target = day or datetime.now().astimezone().date()
+        target = day or self.now_provider().astimezone().date()
         path = self.path_for_date(target)
         if not path.exists():
             return []
@@ -63,13 +63,23 @@ class NotesStore:
                 out.append(item)
         return out
 
-    def read_review_action_items(
+    def read_recent_notes(self, *, days: int = 7, max_items: int = 100) -> List[Dict[str, Any]]:
+        local_today = self.now_provider().astimezone().date()
+        window_days = max(1, int(days or 1))
+        out: List[Dict[str, Any]] = []
+        for offset in range(window_days - 1, -1, -1):
+            target = local_today - timedelta(days=offset)
+            out.extend(self.read_notes(target, max_items=max_items))
+            out.extend(self.read_markdown_notes(target, max_items=max_items))
+        return out[-max(1, int(max_items)) :]
+
+    def read_markdown_notes(
         self,
         day: Optional[date] = None,
         *,
         max_items: int = 50,
     ) -> List[Dict[str, Any]]:
-        target = day or datetime.now().astimezone().date()
+        target = day or self.now_provider().astimezone().date()
         path = self.notes_markdown_path
         if not path.exists():
             return []
@@ -80,31 +90,50 @@ class NotesStore:
 
         out: List[Dict[str, Any]] = []
         current_day: Optional[date] = None
-        current_time = ""
+        legacy_time = ""
         for raw in lines:
             line = raw.strip()
-            header = re.match(r"^##\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})", line)
+            header = re.match(r"^##\s+(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}))?", line)
             if header:
                 try:
                     current_day = date.fromisoformat(header.group(1))
                 except ValueError:
                     current_day = None
-                current_time = header.group(2)
+                legacy_time = header.group(2) or ""
                 continue
-            if current_day != target:
+            if current_day != target or not line.startswith("- "):
                 continue
-            if not line.startswith("- "):
-                continue
+
             text = line[2:].strip()
+            time_label = legacy_time or "time?"
+            source = "telegram_review" if legacy_time else "telegram"
+            modern = re.match(r"^(\d{2}:\d{2})\s+\[([^\]]+)\]\s+(.+)", text)
+            if modern:
+                time_label = modern.group(1)
+                source = modern.group(2)
+                text = modern.group(3).strip()
             if text:
                 out.append(
                     {
-                        "time_label": current_time or "time?",
-                        "source": "telegram_review",
+                        "date_label": current_day.isoformat(),
+                        "time_label": time_label,
+                        "source": source,
                         "text": text,
                     }
                 )
         return out[-max(1, int(max_items)) :]
+
+    def read_review_action_items(
+        self,
+        day: Optional[date] = None,
+        *,
+        max_items: int = 50,
+    ) -> List[Dict[str, Any]]:
+        return [
+            item
+            for item in self.read_markdown_notes(day, max_items=max_items)
+            if str(item.get("source") or "").lower() in {"review", "telegram_review"}
+        ]
 
     def path_for_date(self, day: date) -> Path:
         return self.notes_dir / f"{day.isoformat()}.jsonl"
@@ -128,18 +157,40 @@ class NotesStore:
         if not clean_items:
             return {"path": str(self.notes_markdown_path), "items": 0}
 
-        header = local_now.strftime("## %Y-%m-%d %H:%M %Z")
-        detail = f"source={source}"
-        if user_id:
-            detail += f", user_id={int(user_id)}"
-        lines = [header, f"_Review action items ({detail})_", ""]
-        lines.extend(f"- {item}" for item in clean_items)
+        self._append_markdown_items(clean_items, local_now=local_now, source_label="review")
+        return {"path": str(self.notes_markdown_path), "items": len(clean_items)}
+
+    def _append_markdown_items(
+        self,
+        items: List[str],
+        *,
+        local_now: datetime,
+        source_label: str,
+    ) -> None:
+        clean_items = [str(item or "").strip() for item in items if str(item or "").strip()]
+        if not clean_items:
+            return
+        day_label = local_now.date().isoformat()
+        time_label = local_now.strftime("%H:%M")
+        self.notes_markdown_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            existing = self.notes_markdown_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            existing = ""
+
+        lines: List[str] = []
+        if existing and not existing.endswith("\n"):
+            lines.append("")
+        if f"## {day_label}" not in existing:
+            if existing:
+                lines.append("")
+            lines.append(f"## {day_label}")
+            lines.append("")
+        lines.extend(f"- {time_label} [{source_label}] {item}" for item in clean_items)
         lines.append("")
 
-        self.notes_markdown_path.parent.mkdir(parents=True, exist_ok=True)
         with self.notes_markdown_path.open("a", encoding="utf-8", newline="\n") as fh:
             fh.write("\n".join(lines))
-        return {"path": str(self.notes_markdown_path), "items": len(clean_items)}
 
 
 def format_notes(notes: List[Dict[str, Any]], *, label: str = "today") -> str:
@@ -149,10 +200,21 @@ def format_notes(notes: List[Dict[str, Any]], *, label: str = "today") -> str:
     for item in notes:
         stamp = str(item.get("time_utc") or "")
         time_label = str(item.get("time_label") or "")
+        date_label = str(item.get("date_label") or "")
         text = str(item.get("text") or "")
-        time_part = time_label or (stamp[11:16] + "Z" if len(stamp) >= 16 else "time?")
+        time_part = _format_note_time(stamp, time_label, date_label)
         lines.append(f"- {time_part} {text}")
     return "\n".join(lines)
+
+
+def _format_note_time(stamp: str, time_label: str, date_label: str) -> str:
+    if date_label and time_label:
+        return f"{date_label} {time_label}"
+    if len(stamp) >= 16:
+        return f"{stamp[:10]} {stamp[11:16]}Z"
+    if time_label:
+        return time_label
+    return "time?"
 
 
 def extract_action_items(report_text: str) -> List[str]:
