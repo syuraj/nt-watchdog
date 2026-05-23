@@ -314,22 +314,22 @@ def format_health(state: _SharedSnapshot) -> str:
     lines: List[str] = []
     lines.append(f"{dot} NT connections: {connected}/{total}")
     lines.append(f"Strategies: {active} active / {total_strats} total")
+    if strategies:
+        lines.append("Strategy balances:")
     for s in strategies:
         strategy_dot = "\U0001F7E2" if _strategy_is_active(s) else "\U0001F534"
         name = str(s.get("name") or "?")
         account = str(s.get("account") or "?")
-        account_value = _fmt_money(cash_by_account.get(account)) if account in cash_by_account else "?"
+        account_value = _fmt_compact_money(cash_by_account.get(account)) if account in cash_by_account else "$?"
         state_str = str(s.get("state") or "")
-        details = [account_value]
+        status_parts = []
         if not _strategy_is_active(s):
-            status_parts = []
             if not bool(s.get("is_enabled")):
                 status_parts.append("off")
             if state_str and state_str.lower() not in {"active", "realtime"}:
                 status_parts.append(state_str)
-            if status_parts:
-                details.append("/".join(status_parts))
-        lines.append(f" {strategy_dot} {name} ({', '.join(details)})")
+        suffix = f" ({'/'.join(status_parts)})" if status_parts else ""
+        lines.append(f" {strategy_dot} {account_value} -> {name}{suffix}")
     lines.append(f"Health: {status}")
     reasons = health.get("reasons") or []
     if isinstance(reasons, list) and reasons:
@@ -462,6 +462,20 @@ def _fmt_money(val: Any) -> str:
         return "$?"
     sign = "-" if n < 0 else ""
     return f"{sign}${abs(n):,.2f}"
+
+
+def _fmt_compact_money(val: Any) -> str:
+    try:
+        n = float(val)
+    except (TypeError, ValueError):
+        return "$?"
+    sign = "-" if n < 0 else ""
+    abs_n = abs(n)
+    if abs_n >= 1_000_000:
+        return f"{sign}${abs_n / 1_000_000:.1f}m"
+    if abs_n >= 1_000:
+        return f"{sign}${abs_n / 1_000:.1f}k"
+    return f"{sign}${abs_n:,.0f}"
 
 
 def _pnl_dot(val: Any) -> str:
