@@ -37,10 +37,24 @@ class RecoveryManager:
         self.runtime_state = self.state_store.load_runtime_state()
         self.post_reconnect_delay_sec = 15
         self.post_startup_enable_delay_sec = 3
+        self.strategy_enable_retry_delay_sec = 5
         self._manual_lock = threading.Lock()
 
     def _persist_runtime(self) -> None:
         self.state_store.save_runtime_state(self.runtime_state)
+
+    def _mark_strategy_enable_pending(self, reason: str, attempts: int = 0) -> None:
+        self.runtime_state["strategy_enable_pending"] = {
+            "reason": reason,
+            "attempts": attempts,
+            "updated_utc": _utc_now(),
+        }
+        self._persist_runtime()
+
+    def _clear_strategy_enable_pending(self) -> None:
+        if "strategy_enable_pending" in self.runtime_state:
+            self.runtime_state.pop("strategy_enable_pending", None)
+            self._persist_runtime()
 
     def _get_incident_id(self) -> str:
         incident_id = self.runtime_state.get("last_incident_id", "")
@@ -222,6 +236,8 @@ class RecoveryManager:
         #       still shows active_count<total_count (e.g. virtualized row
         #       not in tree when scanned, or Space keypress lost). Retry.
         strat_result: Dict[str, Any] = {}
+        total = 0
+        active = 0
         for attempt in range(3):
             # Dismiss any dialog that popped after boot (esp. "window
             # outside viewable range" - NT may show it late). Always call,
@@ -235,10 +251,10 @@ class RecoveryManager:
             sr = snap.get("strategy_runtime", {}) if isinstance(snap, dict) else {}
             total = int(sr.get("total_count", 0) or 0)
             active = int(sr.get("active_count", 0) or 0)
-            if checkbox_count > 0 and total > 0 and active >= total:
+            if total > 0 and active >= total:
                 break
             if attempt < 2:
-                time.sleep(5)
+                time.sleep(self.strategy_enable_retry_delay_sec)
 
         toggled = int(strat_result.get("toggled", 0) or 0)
         self.state_store.append_event(
@@ -253,6 +269,9 @@ class RecoveryManager:
         return {
             "bridge_up": bridge_up,
             "strategies_toggled": toggled,
+            "strategies_active": bool(total > 0 and active >= total),
+            "strategy_total": total,
+            "strategy_active": active,
             "strategies_result": strat_result,
         }
 
@@ -280,6 +299,10 @@ class RecoveryManager:
             reason=reason,
             bridge_wait_sec=max(30, int(bridge_wait_sec if bridge_wait_sec is not None else self.config.startup_grace_sec)),
         )
+        if restore_meta.get("strategies_active"):
+            self._clear_strategy_enable_pending()
+        else:
+            self._mark_strategy_enable_pending(reason, attempts=1)
         result = {
             "state": "recovering",
             "action": "start_nt",
@@ -287,6 +310,7 @@ class RecoveryManager:
             "incident_id": incident_id,
             "bridge_up": restore_meta["bridge_up"],
             "strategies_toggled": restore_meta["strategies_toggled"],
+            "strategies_active": restore_meta["strategies_active"],
         }
         result.update(notify_meta)
         return result
@@ -387,14 +411,26 @@ class RecoveryManager:
             prior_incident = self.runtime_state.get("last_incident_id", "")
             self.runtime_state["reconnect_failures"] = 0
             restore_info = {}
+            strategy_enable_info = {}
             resolved_alert_meta = {}
+            pending_strategy_enable = self.runtime_state.get("strategy_enable_pending")
+            if isinstance(pending_strategy_enable, dict):
+                attempts = int(pending_strategy_enable.get("attempts", 0) or 0) + 1
+                reason = str(pending_strategy_enable.get("reason") or "pending_strategy_enable")
+                strategy_enable_info = self._enable_strategies_after_startup(reason=reason, bridge_wait_sec=5)
+                if strategy_enable_info.get("strategies_active"):
+                    self._clear_strategy_enable_pending()
+                    runtime_snapshot = self.bridge.safe_runtime_snapshot()
+                else:
+                    self._mark_strategy_enable_pending(reason, attempts=attempts)
             if self.runtime_state.get("awaiting_restore"):
                 restore_info = self._attempt_snapshot_restore(runtime_snapshot)
                 # Keep prior snapshot when restore is still manual-required.
                 if restore_info.get("restored"):
                     self._store_last_good_snapshot(runtime_snapshot, health)
             else:
-                self._store_last_good_snapshot(runtime_snapshot, health)
+                if not self.runtime_state.get("strategy_enable_pending"):
+                    self._store_last_good_snapshot(runtime_snapshot, health)
             self._persist_runtime()
             if prior_incident:
                 # Log the resolution as an event but skip the Telegram send — a
@@ -412,6 +448,8 @@ class RecoveryManager:
                 )
                 self._clear_incident()
             result = {"state": "healthy", "action": "none", "reason": "ok"}
+            if strategy_enable_info:
+                result["strategy_enable"] = strategy_enable_info
             if restore_info:
                 result["restore"] = restore_info
             if resolved_alert_meta:
@@ -586,24 +624,47 @@ class RecoveryManager:
         restarted = self.process_manager.restart(startup_grace_sec=self.config.startup_grace_sec)
         if restarted:
             self.runtime_state["reconnect_failures"] = 0
-            self._mark_restart()
+            # Automated restart now uses the same activation path as manual
+            # /restart. The older awaiting_restore path only compared snapshots
+            # and could end in a manual-required alert without trying the
+            # HealthBridge UIA enable flow.
+            self._mark_restart(awaiting_restore=False)
+            restore_meta = self._enable_strategies_after_startup(
+                reason=restart_reason,
+                bridge_wait_sec=max(30, int(self.config.startup_grace_sec)),
+            )
+            if restore_meta.get("strategies_active"):
+                self._clear_strategy_enable_pending()
+            else:
+                self._mark_strategy_enable_pending(restart_reason, attempts=1)
             self.state_store.append_event(
                 {
                     "kind": "restart",
                     "status": "success",
                     "incident_id": incident_id,
                     "reason": restart_reason,
+                    "bridge_up": restore_meta["bridge_up"],
+                    "strategies_toggled": restore_meta["strategies_toggled"],
+                    "strategies_active": restore_meta["strategies_active"],
                 }
             )
             notify_meta = self._notify(
                 "restart_success",
-                {"status": "recovering", "action": "restart_nt", "reason": restart_reason},
+                {
+                    "status": "recovering",
+                    "action": "restart_nt",
+                    "reason": restart_reason,
+                    "strategies_toggled": restore_meta["strategies_toggled"],
+                },
             )
             result = {
                 "state": "recovering",
                 "action": "restart_nt",
                 "reason": restart_reason,
                 "incident_id": incident_id,
+                "bridge_up": restore_meta["bridge_up"],
+                "strategies_toggled": restore_meta["strategies_toggled"],
+                "strategies_active": restore_meta["strategies_active"],
             }
             result.update(notify_meta)
             return result

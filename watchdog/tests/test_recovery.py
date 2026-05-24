@@ -11,8 +11,15 @@ from watchdog.state_store import StateStore
 
 
 class FakeBridge:
-    def __init__(self, reconnect_results: List[Dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        reconnect_results: List[Dict[str, Any]],
+        runtime_snapshots: List[Dict[str, Any]] | None = None,
+        health_results: List[Dict[str, Any]] | None = None,
+    ) -> None:
         self.reconnect_results = reconnect_results
+        self.runtime_snapshots = list(runtime_snapshots or [])
+        self.health_results = list(health_results or [])
         self.calls = 0
         self.last_connection_names: List[str] = []
 
@@ -39,10 +46,14 @@ class FakeBridge:
 
     def safe_health(self) -> Dict[str, Any]:
         self.safe_health_calls = getattr(self, "safe_health_calls", 0) + 1
+        if self.health_results:
+            return self.health_results.pop(0)
         return {"status": "ok"}
 
     def safe_runtime_snapshot(self) -> Dict[str, Any]:
         self.safe_snap_calls = getattr(self, "safe_snap_calls", 0) + 1
+        if self.runtime_snapshots:
+            return self.runtime_snapshots.pop(0)
         return {"strategy_runtime": {"total_count": 1, "active_count": 1, "strategies": []}}
 
 
@@ -103,6 +114,7 @@ class RecoveryTests(unittest.TestCase):
         manager = RecoveryManager(**kwargs)
         manager.post_reconnect_delay_sec = 0
         manager.post_startup_enable_delay_sec = 0
+        manager.strategy_enable_retry_delay_sec = 0
         return manager
 
     def _build_config(self, temp_dir: str) -> WatchdogConfig:
@@ -214,6 +226,36 @@ class RecoveryTests(unittest.TestCase):
 
             self.assertEqual(result["action"], "restart_nt")
             self.assertEqual(process.restart_calls, 1)
+            self.assertEqual(getattr(bridge, "enable_strategies_calls", 0), 1)
+            self.assertTrue(result["strategies_active"])
+            self.assertFalse(state.load_runtime_state().get("awaiting_restore", False))
+
+    def test_automated_restart_marks_strategy_enable_pending_when_not_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            state = StateStore(cfg)
+            inactive = {"strategy_runtime": {"total_count": 1, "active_count": 0, "strategies": []}}
+            bridge = FakeBridge([{"success": False, "error": "bridge timeout"}], runtime_snapshots=[inactive, inactive, inactive])
+            process = FakeProcessManager(restart_ok=True)
+            notifier = FakeNotifier()
+
+            manager = self._make_manager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=notifier,  # type: ignore[arg-type]
+            )
+            result = manager.handle_cycle(
+                health={"status": "stuck", "reasons": ["main_thread_unresponsive"]},
+                runtime_snapshot={"positions": []},
+            )
+
+            self.assertEqual(result["action"], "restart_nt")
+            self.assertFalse(result["strategies_active"])
+            runtime = state.load_runtime_state()
+            self.assertFalse(runtime.get("awaiting_restore", False))
+            self.assertIn("strategy_enable_pending", runtime)
 
     def test_no_connections_detected_attempts_reconnect(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -502,6 +544,81 @@ class RecoveryTests(unittest.TestCase):
             self.assertFalse(result["bridge_up"])
             self.assertEqual(process.start_calls, 1)
             self.assertEqual(getattr(bridge, "enable_strategies_calls", 0), 0)
+
+    def test_bootstrap_start_marks_pending_when_strategy_enable_not_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            state = StateStore(cfg)
+            inactive = {"strategy_runtime": {"total_count": 1, "active_count": 0, "strategies": []}}
+            bridge = FakeBridge([], runtime_snapshots=[inactive, inactive, inactive])
+            process = FakeProcessManager(manual_ok=True)
+            notifier = FakeNotifier()
+
+            manager = self._make_manager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=notifier,  # type: ignore[arg-type]
+            )
+            result = manager.bootstrap_start(bridge_wait_sec=0)
+
+            self.assertFalse(result["strategies_active"])
+            self.assertIn("strategy_enable_pending", state.load_runtime_state())
+
+    def test_healthy_cycle_retries_pending_strategy_enable_before_saving_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            state = StateStore(cfg)
+            inactive = {"strategy_runtime": {"total_count": 1, "active_count": 0, "strategies": []}}
+            active = {"strategy_runtime": {"total_count": 1, "active_count": 1, "strategies": []}}
+            bridge = FakeBridge([], runtime_snapshots=[active, active])
+            process = FakeProcessManager(manual_ok=True)
+            notifier = FakeNotifier()
+            runtime = state.load_runtime_state()
+            runtime["strategy_enable_pending"] = {"reason": "process_not_running", "attempts": 1}
+            state.save_runtime_state(runtime)
+
+            manager = self._make_manager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=notifier,  # type: ignore[arg-type]
+            )
+            result = manager.handle_cycle(health={"status": "ok", "reasons": []}, runtime_snapshot=inactive)
+
+            self.assertIn("strategy_enable", result)
+            self.assertTrue(result["strategy_enable"]["strategies_active"])
+            self.assertNotIn("strategy_enable_pending", state.load_runtime_state())
+            self.assertEqual(state.load_snapshot()["strategy_runtime"]["active_count"], 1)
+
+    def test_healthy_cycle_keeps_pending_and_does_not_overwrite_snapshot_on_failed_strategy_enable(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            state = StateStore(cfg)
+            active = {"strategy_runtime": {"total_count": 1, "active_count": 1, "strategies": []}}
+            inactive = {"strategy_runtime": {"total_count": 1, "active_count": 0, "strategies": []}}
+            state.save_snapshot(active)
+            bridge = FakeBridge([], runtime_snapshots=[inactive, inactive, inactive])
+            process = FakeProcessManager(manual_ok=True)
+            notifier = FakeNotifier()
+            runtime = state.load_runtime_state()
+            runtime["strategy_enable_pending"] = {"reason": "process_not_running", "attempts": 1}
+            state.save_runtime_state(runtime)
+
+            manager = self._make_manager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=notifier,  # type: ignore[arg-type]
+            )
+            result = manager.handle_cycle(health={"status": "ok", "reasons": []}, runtime_snapshot=inactive)
+
+            self.assertFalse(result["strategy_enable"]["strategies_active"])
+            self.assertIn("strategy_enable_pending", state.load_runtime_state())
+            self.assertEqual(state.load_snapshot()["strategy_runtime"]["active_count"], 1)
 
 
 class ManualRestartTests(unittest.TestCase):
