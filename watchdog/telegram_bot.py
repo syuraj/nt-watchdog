@@ -32,6 +32,7 @@ from .notes_store import NotesStore, format_notes
 
 
 NOTES_REPLY_MAX_CHARS = 3900
+STRATEGY_BALANCE_WARNING_THRESHOLD = 100000.0
 
 
 @dataclass
@@ -303,10 +304,15 @@ def format_health(state: _SharedSnapshot) -> str:
     active = sum(1 for s in strategies if _strategy_is_active(s))
     total_strats = len(strategies)
     any_inactive_strategy = any(not _strategy_is_active(s) for s in strategies)
+    any_active_strategy_under_threshold = any(
+        _strategy_is_active(s)
+        and _account_cash_below_threshold(cash_by_account.get(str(s.get("account") or "")))
+        for s in strategies
+    )
 
     if not (isinstance(connected, int) and connected > 0 and status == "ok"):
         dot = "\U0001F534"
-    elif any_inactive_strategy:
+    elif any_inactive_strategy or any_active_strategy_under_threshold:
         dot = "\U0001F7E1"
     else:
         dot = "\U0001F7E2"
@@ -317,10 +323,16 @@ def format_health(state: _SharedSnapshot) -> str:
     if strategies:
         lines.append("Strategy balances:")
     for s in strategies:
-        strategy_dot = "\U0001F7E2" if _strategy_is_active(s) else "\U0001F534"
         name = str(s.get("name") or "?")
         account = str(s.get("account") or "?")
-        account_value = _fmt_compact_money(cash_by_account.get(account)) if account in cash_by_account else "$?"
+        account_cash = cash_by_account.get(account)
+        account_value = _fmt_compact_money(account_cash) if account in cash_by_account else "$?"
+        if not _strategy_is_active(s):
+            strategy_dot = "\U0001F534"
+        elif _account_cash_below_threshold(account_cash):
+            strategy_dot = "\U0001F7E1"
+        else:
+            strategy_dot = "\U0001F7E2"
         state_str = str(s.get("state") or "")
         status_parts = []
         if not _strategy_is_active(s):
@@ -484,6 +496,13 @@ def _pnl_dot(val: Any) -> str:
     except (TypeError, ValueError):
         n = 0.0
     return "\U0001F534" if n < -0.005 else "\U0001F7E2"
+
+
+def _account_cash_below_threshold(cash: Any) -> bool:
+    try:
+        return float(cash) < STRATEGY_BALANCE_WARNING_THRESHOLD
+    except (TypeError, ValueError):
+        return False
 
 
 def _strategy_is_active(strategy: Dict[str, Any]) -> bool:

@@ -38,7 +38,7 @@ class FormatHealthTests(unittest.TestCase):
                 },
                 "accounts": [
                     {"name": "SimA", "cash": 101000.25},
-                    {"name": "SimB", "cash": 99000.0},
+                    {"name": "SimB", "cash": 100000.0},
                 ],
             },
         )
@@ -48,7 +48,7 @@ class FormatHealthTests(unittest.TestCase):
         self.assertIn("Strategies: 2 active / 2 total", out)
         self.assertIn("Strategy balances:", out)
         self.assertIn("$101.0k -> S1", out)
-        self.assertIn("$99.0k -> S2", out)
+        self.assertIn("$100.0k -> S2", out)
         self.assertNotIn("S1 (SimA)", out)
         self.assertNotIn("(active)", out)
         self.assertIn("Health: ok", out)
@@ -86,6 +86,29 @@ class FormatHealthTests(unittest.TestCase):
         self.assertIn("Strategies: 1 active / 2 total", out)
         self.assertIn("\U0001F7E2 $101.0k -> S1", out)
         self.assertIn("\U0001F534 $99.0k -> S2 (off/Finalized)", out)
+
+    def test_active_strategy_under_100k_shows_yellow(self) -> None:
+        state = TelegramSharedState()
+        state.publish(
+            {"status": "ok", "connections": {"total": 1, "connected": 1}},
+            {
+                "strategy_runtime": {
+                    "strategies": [
+                        {"name": "Funded", "is_enabled": True, "state": "Realtime", "account": "SimA"},
+                        {"name": "LowBalance", "is_enabled": True, "state": "Realtime", "account": "SimB"},
+                    ]
+                },
+                "accounts": [
+                    {"name": "SimA", "cash": 100000.0},
+                    {"name": "SimB", "cash": 99000.0},
+                ],
+            },
+        )
+        out = format_health(state.snapshot())
+        self.assertIn("\U0001F7E1 NT connections: 1/1", out)
+        self.assertIn("\U0001F7E2 $100.0k -> Funded", out)
+        self.assertIn("\U0001F7E1 $99.0k -> LowBalance", out)
+        self.assertNotIn("\U0001F534 $99.0k -> LowBalance", out)
 
     def test_strategies_are_sorted_alphabetically(self) -> None:
         state = TelegramSharedState()
