@@ -6,7 +6,6 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from uuid import uuid4
 
 from .bridge_client import BridgeClient
 from .config import WatchdogConfig, load_config
@@ -155,18 +154,24 @@ def run_watchdog(config: WatchdogConfig, max_cycles: int = 0) -> None:
 
             # Bootstrapping: if NT process is down outside startup grace, start it.
             if not process_running and (time.time() - started) > config.startup_grace_sec:
-                if process_manager.start():
-                    state_store.append_event({"kind": "process_start", "status": "success", "reason": "process_not_running"})
-                    # Route through recovery._notify so the event log captures
-                    # alert success + last_error, matching the rest of the flow.
-                    recovery._notify(
-                        "process_started",
-                        {"status": "recovering", "action": "start_nt", "reason": "process_not_running"},
-                        incident_id=uuid4().hex[:10],
-                    )
-                    time.sleep(max(5, config.startup_grace_sec))
+                result = recovery.bootstrap_start(bridge_wait_sec=config.startup_grace_sec)
+                alert_suffix = ""
+                if result.get("alert_skipped"):
+                    alert_suffix = " alert_skipped=True"
+                elif "alert_sent" in result:
+                    alert_suffix = f" alert_sent={result.get('alert_sent')}"
+                    if result.get("alert_sent") is False:
+                        alert_error = str(result.get("alert_error", "") or "")
+                        if len(alert_error) > 160:
+                            alert_error = alert_error[:157] + "..."
+                        if alert_error:
+                            alert_suffix += f" alert_error={alert_error}"
+                print(
+                    f"[{_now()}] bootstrap action={result.get('action')} reason={result.get('reason')} "
+                    f"bridge_up={result.get('bridge_up')} strategies_toggled={result.get('strategies_toggled')}{alert_suffix}"
+                )
+                if result.get("action") != "start_failed":
                     continue
-                state_store.append_event({"kind": "process_start", "status": "failed", "reason": "process_not_running"})
 
             result = recovery.handle_cycle(health=health, runtime_snapshot=runtime_snapshot)
             conn = health.get("connections", {}) if isinstance(health, dict) else {}

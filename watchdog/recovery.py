@@ -36,6 +36,7 @@ class RecoveryManager:
         self.restorer = restorer or StrategyUiRestorer()
         self.runtime_state = self.state_store.load_runtime_state()
         self.post_reconnect_delay_sec = 15
+        self.post_startup_enable_delay_sec = 3
         self._manual_lock = threading.Lock()
 
     def _persist_runtime(self) -> None:
@@ -184,6 +185,111 @@ class RecoveryManager:
         self.state_store.append_event({"kind": "restore", "status": "manual", "message": message})
         self._notify("restore_manual_required", {"status": "degraded", "action": "manual_restore", "reason": message})
         return {"restored": False, "reason": message}
+
+    def _wait_for_bridge(self, bridge_wait_sec: int) -> bool:
+        deadline = time.time() + max(0, bridge_wait_sec)
+        while time.time() < deadline:
+            health = self.bridge.safe_health()
+            if str(health.get("status", "")).lower() == "ok":
+                return True
+            time.sleep(2)
+        return False
+
+    def _enable_strategies_after_startup(self, reason: str, bridge_wait_sec: int) -> Dict[str, Any]:
+        bridge_up = self._wait_for_bridge(bridge_wait_sec)
+        if bridge_up:
+            # Short settle so broker account subscription finishes before
+            # enable_all. Empirically 3s is enough; was 15s.
+            time.sleep(self.post_startup_enable_delay_sec)
+            # Dismiss benign startup dialogs ("window outside viewable
+            # range", license prompts) that would block subsequent UIA
+            # automation like enable_all.
+            dismiss = self.bridge.dismiss_blocking_dialogs()
+            if dismiss.get("dismissed", 0):
+                self.state_store.append_event(
+                    {
+                        "kind": "dialogs_dismissed",
+                        "dismissed": dismiss.get("dismissed", 0),
+                        "clicked": dismiss.get("clicked", []),
+                        "trigger": reason,
+                    }
+                )
+
+        # Retry enable_all up to 3 times. Two failure modes:
+        #   (1) Grid empty (checkbox_count=0) - NT hasn't populated
+        #       Strategies tab yet. Retry after short delay.
+        #   (2) Partial miss - UIA toggled some rows but runtime_snapshot
+        #       still shows active_count<total_count (e.g. virtualized row
+        #       not in tree when scanned, or Space keypress lost). Retry.
+        strat_result: Dict[str, Any] = {}
+        for attempt in range(3):
+            # Dismiss any dialog that popped after boot (esp. "window
+            # outside viewable range" - NT may show it late). Always call,
+            # cheap no-op when no dialog present.
+            self.bridge.dismiss_blocking_dialogs()
+            strat_result = self.bridge.enable_all_strategies()
+            checkbox_count = int(strat_result.get("checkbox_count", 0) or 0)
+            # Verify via runtime_snapshot - UIA-based toggled count can
+            # miss virtualized rows silently.
+            snap = self.bridge.safe_runtime_snapshot()
+            sr = snap.get("strategy_runtime", {}) if isinstance(snap, dict) else {}
+            total = int(sr.get("total_count", 0) or 0)
+            active = int(sr.get("active_count", 0) or 0)
+            if checkbox_count > 0 and total > 0 and active >= total:
+                break
+            if attempt < 2:
+                time.sleep(5)
+
+        toggled = int(strat_result.get("toggled", 0) or 0)
+        self.state_store.append_event(
+            {
+                "kind": "strategies_enable",
+                "toggled": toggled,
+                "checkbox_count": strat_result.get("checkbox_count", 0),
+                "details": strat_result,
+                "trigger": reason,
+            }
+        )
+        return {
+            "bridge_up": bridge_up,
+            "strategies_toggled": toggled,
+            "strategies_result": strat_result,
+        }
+
+    def bootstrap_start(self, bridge_wait_sec: Optional[int] = None) -> Dict[str, Any]:
+        incident_id = uuid4().hex[:10]
+        reason = "process_not_running"
+        if not self.process_manager.start():
+            self.state_store.append_event({"kind": "process_start", "status": "failed", "reason": reason})
+            return {
+                "state": "degraded",
+                "action": "start_failed",
+                "reason": reason,
+                "incident_id": incident_id,
+                "bridge_up": False,
+                "strategies_toggled": 0,
+            }
+
+        self.state_store.append_event({"kind": "process_start", "status": "success", "reason": reason})
+        notify_meta = self._notify(
+            "process_started",
+            {"status": "recovering", "action": "start_nt", "reason": reason},
+            incident_id=incident_id,
+        )
+        restore_meta = self._enable_strategies_after_startup(
+            reason=reason,
+            bridge_wait_sec=max(30, int(bridge_wait_sec if bridge_wait_sec is not None else self.config.startup_grace_sec)),
+        )
+        result = {
+            "state": "recovering",
+            "action": "start_nt",
+            "reason": reason,
+            "incident_id": incident_id,
+            "bridge_up": restore_meta["bridge_up"],
+            "strategies_toggled": restore_meta["strategies_toggled"],
+        }
+        result.update(notify_meta)
+        return result
 
     def _attempt_reconnect(self, runtime_snapshot: Dict[str, Any], extra_event: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Run a single reconnect attempt and log the outcome as a reconnect_attempt event.
@@ -571,68 +677,9 @@ class RecoveryManager:
             # telling the user "Manual enable required".
             self._mark_restart(awaiting_restore=False)
 
-            # Skip the blind startup_grace sleep — poll bridge directly. NT is
-            # ready when /health returns ok; polling 2s beats blind 90s wait.
-            deadline = time.time() + max(0, bridge_wait_sec)
-            bridge_up = False
-            while time.time() < deadline:
-                health = self.bridge.safe_health()
-                if str(health.get("status", "")).lower() == "ok":
-                    bridge_up = True
-                    break
-                time.sleep(2)
-
-            if bridge_up:
-                # Short settle so broker account subscription finishes before
-                # enable_all. Empirically 3s is enough; was 15s.
-                time.sleep(3)
-                # Dismiss benign startup dialogs ("window outside viewable
-                # range", license prompts) that would block subsequent UIA
-                # automation like enable_all.
-                dismiss = self.bridge.dismiss_blocking_dialogs()
-                if dismiss.get("dismissed", 0):
-                    self.state_store.append_event(
-                        {
-                            "kind": "dialogs_dismissed",
-                            "dismissed": dismiss.get("dismissed", 0),
-                            "clicked": dismiss.get("clicked", []),
-                            "trigger": reason,
-                        }
-                    )
-            # Retry enable_all up to 3 times. Two failure modes:
-            #   (1) Grid empty (checkbox_count=0) — NT hasn't populated
-            #       Strategies tab yet. Retry after short delay.
-            #   (2) Partial miss — UIA toggled some rows but runtime_snapshot
-            #       still shows active_count<total_count (e.g. virtualized row
-            #       not in tree when scanned, or Space keypress lost). Retry.
-            strat_result: Dict[str, Any] = {}
-            for attempt in range(3):
-                # Dismiss any dialog that popped after boot (esp. "window
-                # outside viewable range" — NT may show it late). Always call,
-                # cheap no-op when no dialog present.
-                self.bridge.dismiss_blocking_dialogs()
-                strat_result = self.bridge.enable_all_strategies()
-                checkbox_count = int(strat_result.get("checkbox_count", 0) or 0)
-                # Verify via runtime_snapshot — UIA-based toggled count can
-                # miss virtualized rows silently.
-                snap = self.bridge.safe_runtime_snapshot()
-                sr = snap.get("strategy_runtime", {}) if isinstance(snap, dict) else {}
-                total = int(sr.get("total_count", 0) or 0)
-                active = int(sr.get("active_count", 0) or 0)
-                if checkbox_count > 0 and total > 0 and active >= total:
-                    break
-                if attempt < 2:
-                    time.sleep(5)
-            toggled = int(strat_result.get("toggled", 0) or 0)
-            self.state_store.append_event(
-                {
-                    "kind": "strategies_enable",
-                    "toggled": toggled,
-                    "checkbox_count": strat_result.get("checkbox_count", 0),
-                    "details": strat_result,
-                    "trigger": reason,
-                }
-            )
+            restore_meta = self._enable_strategies_after_startup(reason=reason, bridge_wait_sec=bridge_wait_sec)
+            bridge_up = bool(restore_meta.get("bridge_up"))
+            toggled = int(restore_meta.get("strategies_toggled", 0) or 0)
             self.state_store.append_event(
                 {
                     "kind": "restart",
@@ -656,4 +703,3 @@ class RecoveryManager:
             }
         finally:
             self._manual_lock.release()
-

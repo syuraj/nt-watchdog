@@ -102,6 +102,7 @@ class RecoveryTests(unittest.TestCase):
     def _make_manager(self, **kwargs: Any) -> RecoveryManager:
         manager = RecoveryManager(**kwargs)
         manager.post_reconnect_delay_sec = 0
+        manager.post_startup_enable_delay_sec = 0
         return manager
 
     def _build_config(self, temp_dir: str) -> WatchdogConfig:
@@ -457,6 +458,51 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(notif_events[0]["sent"], False)
             self.assertEqual(notif_events[0]["error"], "simulated telegram failure")
 
+    def test_bootstrap_start_enables_strategies_after_bridge_is_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            state = StateStore(cfg)
+            bridge = FakeBridge([])
+            process = FakeProcessManager(manual_ok=True)
+            notifier = FakeNotifier()
+
+            manager = self._make_manager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=notifier,  # type: ignore[arg-type]
+            )
+            result = manager.bootstrap_start(bridge_wait_sec=0)
+
+            self.assertEqual(result["action"], "start_nt")
+            self.assertTrue(result["bridge_up"])
+            self.assertEqual(result["strategies_toggled"], 1)
+            self.assertEqual(process.start_calls, 1)
+            self.assertEqual(getattr(bridge, "enable_strategies_calls", 0), 1)
+
+    def test_bootstrap_start_failure_does_not_enable_strategies(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            state = StateStore(cfg)
+            bridge = FakeBridge([])
+            process = FakeProcessManager(manual_ok=False)
+            notifier = FakeNotifier()
+
+            manager = self._make_manager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=notifier,  # type: ignore[arg-type]
+            )
+            result = manager.bootstrap_start(bridge_wait_sec=0)
+
+            self.assertEqual(result["action"], "start_failed")
+            self.assertFalse(result["bridge_up"])
+            self.assertEqual(process.start_calls, 1)
+            self.assertEqual(getattr(bridge, "enable_strategies_calls", 0), 0)
+
 
 class ManualRestartTests(unittest.TestCase):
     def _build_config(self, temp_dir: str) -> WatchdogConfig:
@@ -537,4 +583,3 @@ class ManualRestartTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
