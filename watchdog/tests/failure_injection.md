@@ -1,6 +1,6 @@
 # Failure Injection Scenarios
 
-These scenarios validate reconnect-first recovery, restart fallback, snapshot restore behavior, and Telegram incident flow.
+These scenarios validate reconnect-first recovery, restart fallback, strategy activation retry behavior, and Telegram incident flow.
 
 ## 1) Connection Drop (Recoverable)
 - Trigger: Disconnect broker/data feed from NT8 manually.
@@ -23,14 +23,14 @@ These scenarios validate reconnect-first recovery, restart fallback, snapshot re
 - Expected:
   - Watchdog detects process not running and starts NT from configured fixed path.
   - During startup grace, watchdog avoids aggressive recovery loops.
-  - Once healthy, watchdog stores new snapshot.
+  - Watchdog waits for HealthBridge, dismisses benign dialogs, enables strategies, and stores a new snapshot only after strategy activation is verified.
 
-## 4) Snapshot Restore Path
+## 4) Strategy Activation Retry Path
 - Trigger: Let watchdog save a healthy snapshot with active strategies, then restart NT.
 - Expected:
-  - Runtime state sets `awaiting_restore`.
-  - On healthy cycle, restore workflow compares current vs snapshot.
-  - If backend restore is unavailable, Telegram emits `restore_manual_required` with missing strategies list.
+  - Watchdog calls `/strategies/enable_all`.
+  - If activation is not verified, runtime state sets `strategy_enable_pending`.
+  - Later healthy cycles retry strategy activation and do not overwrite the last-good snapshot until strategies are active.
 
 ## Automated Test Command
 - `python -m unittest watchdog.tests.test_recovery -v`

@@ -106,7 +106,6 @@ Default bridge port is `8899` (intentionally different from legacy `8888`).
 - `watchdog/bridge_client.py` — `safe_*` wrappers never raise.
 - `watchdog/nt_process.py` — start/detect NT by name or exe path.
 - `watchdog/state_store.py` — appends `logs/health_events.jsonl`, persists `state/last_good_snapshot.json` and `state/runtime_state.json` (restart history, incident id, reconnect-failure count).
-- `watchdog/strategy_ui_restore.py` — NT8 strategy re-enable APIs are limited; currently requests manual restore unless UI automation backend is wired in.
 - `watchdog/telegram_notifier.py` — exposes `last_error` for failure visibility.
 - `watchdog/codex_adhoc.py` — runs whitelisted Telegram plain text / unknown commands through `codex exec` with read-only sandbox, no approval escalation, timeout, queue cap, and capped replies.
 - Telegram `/errors` invokes the same Codex queue with a fixed error-review prompt for recent NT/account/order/HealthBridge/watchdog issues.

@@ -10,7 +10,6 @@ from .bridge_client import BridgeClient
 from .config import WatchdogConfig
 from .nt_process import NTProcessManager
 from .state_store import StateStore
-from .strategy_ui_restore import StrategyUiRestorer
 from .telegram_notifier import TelegramNotifier
 
 
@@ -26,14 +25,12 @@ class RecoveryManager:
         process_manager: NTProcessManager,
         state_store: StateStore,
         notifier: Optional[TelegramNotifier] = None,
-        restorer: Optional[StrategyUiRestorer] = None,
     ) -> None:
         self.config = config
         self.bridge = bridge
         self.process_manager = process_manager
         self.state_store = state_store
         self.notifier = notifier or TelegramNotifier(config)
-        self.restorer = restorer or StrategyUiRestorer()
         self.runtime_state = self.state_store.load_runtime_state()
         self.post_reconnect_delay_sec = 15
         self.post_startup_enable_delay_sec = 3
@@ -98,14 +95,13 @@ class RecoveryManager:
                 return False
         return True
 
-    def _mark_restart(self, awaiting_restore: bool = True) -> None:
+    def _mark_restart(self) -> None:
         restarts = self.runtime_state.get("restarts", [])
         if not isinstance(restarts, list):
             restarts = []
         restarts = self.state_store.prune_restart_history(restarts)
         restarts.append(_utc_now())
         self.runtime_state["restarts"] = restarts
-        self.runtime_state["awaiting_restore"] = awaiting_restore
         self._persist_runtime()
 
     def _notify(
@@ -183,22 +179,14 @@ class RecoveryManager:
         }
         self.state_store.save_snapshot(payload)
 
-    def _attempt_snapshot_restore(self, current_runtime: Dict[str, Any]) -> Dict[str, Any]:
-        snapshot = self.state_store.load_snapshot()
-        if not snapshot:
-            self.runtime_state["awaiting_restore"] = False
-            self._persist_runtime()
-            return {"restored": False, "reason": "missing_snapshot"}
-
-        ok, message = self.restorer.restore(snapshot=snapshot, current_runtime=current_runtime)
-        self.runtime_state["awaiting_restore"] = False
-        self._persist_runtime()
-        if ok:
-            self.state_store.append_event({"kind": "restore", "status": "success", "message": message})
-            return {"restored": True, "reason": message}
-        self.state_store.append_event({"kind": "restore", "status": "manual", "message": message})
-        self._notify("restore_manual_required", {"status": "degraded", "action": "manual_restore", "reason": message})
-        return {"restored": False, "reason": message}
+    @staticmethod
+    def _strategy_counts(runtime_snapshot: Dict[str, Any]) -> tuple[int, int]:
+        strategy_runtime = runtime_snapshot.get("strategy_runtime", {})
+        if not isinstance(strategy_runtime, dict):
+            return 0, 0
+        total = int(strategy_runtime.get("total_count", 0) or 0)
+        active = int(strategy_runtime.get("active_count", 0) or 0)
+        return total, active
 
     def _wait_for_bridge(self, bridge_wait_sec: int) -> bool:
         deadline = time.time() + max(0, bridge_wait_sec)
@@ -410,9 +398,7 @@ class RecoveryManager:
         if status == "ok":
             prior_incident = self.runtime_state.get("last_incident_id", "")
             self.runtime_state["reconnect_failures"] = 0
-            restore_info = {}
             strategy_enable_info = {}
-            resolved_alert_meta = {}
             pending_strategy_enable = self.runtime_state.get("strategy_enable_pending")
             if isinstance(pending_strategy_enable, dict):
                 attempts = int(pending_strategy_enable.get("attempts", 0) or 0) + 1
@@ -423,14 +409,18 @@ class RecoveryManager:
                     runtime_snapshot = self.bridge.safe_runtime_snapshot()
                 else:
                     self._mark_strategy_enable_pending(reason, attempts=attempts)
-            if self.runtime_state.get("awaiting_restore"):
-                restore_info = self._attempt_snapshot_restore(runtime_snapshot)
-                # Keep prior snapshot when restore is still manual-required.
-                if restore_info.get("restored"):
-                    self._store_last_good_snapshot(runtime_snapshot, health)
-            else:
-                if not self.runtime_state.get("strategy_enable_pending"):
-                    self._store_last_good_snapshot(runtime_snapshot, health)
+            elif not runtime_snapshot.get("error"):
+                total, active = self._strategy_counts(runtime_snapshot)
+                if total > 0 and active < total:
+                    reason = "inactive_strategies_detected"
+                    strategy_enable_info = self._enable_strategies_after_startup(reason=reason, bridge_wait_sec=5)
+                    if strategy_enable_info.get("strategies_active"):
+                        self._clear_strategy_enable_pending()
+                        runtime_snapshot = self.bridge.safe_runtime_snapshot()
+                    else:
+                        self._mark_strategy_enable_pending(reason, attempts=1)
+            if not self.runtime_state.get("strategy_enable_pending"):
+                self._store_last_good_snapshot(runtime_snapshot, health)
             self._persist_runtime()
             if prior_incident:
                 # Log the resolution as an event but skip the Telegram send — a
@@ -450,10 +440,6 @@ class RecoveryManager:
             result = {"state": "healthy", "action": "none", "reason": "ok"}
             if strategy_enable_info:
                 result["strategy_enable"] = strategy_enable_info
-            if restore_info:
-                result["restore"] = restore_info
-            if resolved_alert_meta:
-                result.update(resolved_alert_meta)
             return result
 
         incident_id = self._get_incident_id()
@@ -624,11 +610,7 @@ class RecoveryManager:
         restarted = self.process_manager.restart(startup_grace_sec=self.config.startup_grace_sec)
         if restarted:
             self.runtime_state["reconnect_failures"] = 0
-            # Automated restart now uses the same activation path as manual
-            # /restart. The older awaiting_restore path only compared snapshots
-            # and could end in a manual-required alert without trying the
-            # HealthBridge UIA enable flow.
-            self._mark_restart(awaiting_restore=False)
+            self._mark_restart()
             restore_meta = self._enable_strategies_after_startup(
                 reason=restart_reason,
                 bridge_wait_sec=max(30, int(self.config.startup_grace_sec)),
@@ -732,11 +714,7 @@ class RecoveryManager:
                 return {"ok": False, "stop_mode": stop_mode, "strategies_toggled": 0, "error": "process_restart_failed"}
 
             self.runtime_state["reconnect_failures"] = 0
-            # Manual restart does its own enable_all below, so skip the
-            # awaiting_restore flag — otherwise the next watchdog cycle runs
-            # _attempt_snapshot_restore and may fire a duplicate Telegram
-            # telling the user "Manual enable required".
-            self._mark_restart(awaiting_restore=False)
+            self._mark_restart()
 
             restore_meta = self._enable_strategies_after_startup(reason=reason, bridge_wait_sec=bridge_wait_sec)
             bridge_up = bool(restore_meta.get("bridge_up"))

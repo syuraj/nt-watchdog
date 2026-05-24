@@ -13,7 +13,7 @@ Two parts:
 - Attempts staged recovery (reconnect first, restart fallback with circuit breaker).
 - For `no_connections_detected`, attempts reconnect-only recovery with a dedicated cooldown (`no_connections_recovery_cooldown_sec`) and does not escalate to NT process restart from that reason alone.
 - Supports configured reconnect targets via `connection_names` in `config.yaml` (for example `My NinjaTrader`).
-- Saves last-known-good runtime snapshot for restore workflows.
+- Saves last-known-good runtime snapshot for status and recovery context.
 - Open-position policy: flatten then recover.
 - Deduplicates repeat incident alerts during cooldown (`notification_cooldown_sec`).
 
@@ -78,6 +78,6 @@ Scheduled task triggered on TerminalServices Event ID 24 runs `tscon /dest:conso
 - Legacy per-day note JSONL files, if present: `watchdog/state/notes`
 
 ## Notes
-- NT8 strategy re-enable APIs are limited. Watchdog uses UI automation to toggle strategy checkboxes on the Strategies tab after reconnect; falls back to manual restore request if UIA fails.
+- NT8 strategy re-enable APIs are limited. Watchdog uses UI automation to toggle strategy checkboxes on the Strategies tab after reconnect/start/restart and keeps retrying if activation is not verified.
 - See `AGENTS.md` for architecture, editing rules, and verification checklist.
 
