@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import urllib.error
 from collections import defaultdict
@@ -25,12 +26,19 @@ from .codex_adhoc import (
     run_codex_adhoc,
 )
 from .config import WatchdogConfig
+from .notes_store import NotesStore
 from .telegram_bot import _dotnet_ticks, load_sqlite_daily_activity, nt_sqlite_path
 from .telegram_notifier import TelegramNotifier
 
 
 CodexReportRunner = Callable[[CodexAdhocConfig, str], str]
 DAILY_REPORT_TITLE = "\U0001F4CA Daily learning report"
+_REPORT_SECTION_TITLES = (
+    ("transaction learnings", "\U0001F4B8 Transaction learnings"),
+    ("strategy improvement ideas", "\U0001F6E0\ufe0f Strategy improvement ideas"),
+    ("nt/watchdog issues", "\u26a0\ufe0f NT/watchdog issues"),
+    ("action items", "\u2705 Action items"),
+)
 
 
 def parse_report_time(value: str) -> Tuple[int, int]:
@@ -85,7 +93,9 @@ def build_daily_report_prompt(window_label: str = "today") -> str:
             "- Base claims on the prefetched transaction/log/health context first.",
             "- Include account, instrument, strategy/order names, timestamps, and PnL/trade counts when present.",
             "- If context is thin or Codex cannot infer a strategy cause, say that instead of guessing.",
-            "- Prefer short bullets with blank lines between sections; avoid dense paragraphs.",
+            "- Use at most 3 short bullets per section, with one concrete point per bullet.",
+            "- Start each bullet with a useful label such as Day total, Open risk, or GapOrb_NQ_5m.",
+            "- Prefer blank lines between sections; avoid dense paragraphs.",
             "- Use emojis as section/status markers only, not at the start of every sentence.",
             "- Do not wrap symbols, paths, order names, fields, or values in backticks; Telegram receives this as plain text.",
             "- Keep the answer concise enough for Telegram.",
@@ -101,11 +111,84 @@ def format_daily_report_message(
 ) -> str:
     footer_text = ("\n\n" + footer.strip()) if footer.strip() else ""
     body_budget = max(500, int(max_reply_chars or 3500) - len(DAILY_REPORT_TITLE) - len(footer_text) - 2)
-    return DAILY_REPORT_TITLE + "\n\n" + cap_reply(_telegram_plain_text(answer), body_budget) + footer_text
+    return DAILY_REPORT_TITLE + "\n\n" + cap_reply(_format_report_body(answer), body_budget) + footer_text
 
 
 def _telegram_plain_text(text: str) -> str:
     return str(text or "").replace("```", "").replace("`", "")
+
+
+def _format_report_body(text: str) -> str:
+    lines = _telegram_plain_text(text).splitlines()
+    out: List[str] = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            if out and out[-1] != "":
+                out.append("")
+            continue
+        if _is_daily_report_title(line):
+            continue
+        section = _normalize_report_section(line)
+        if section:
+            while out and out[-1] == "":
+                out.pop()
+            if out:
+                out.append("")
+            out.append(section)
+            out.append("")
+            continue
+        bullet = _normalize_report_bullet(line)
+        out.append(bullet or line)
+
+    while out and out[0] == "":
+        out.pop(0)
+    while out and out[-1] == "":
+        out.pop()
+    return "\n".join(out)
+
+
+def _is_daily_report_title(line: str) -> bool:
+    clean = re.sub(r"^[^\w]+", "", line).strip().rstrip(":").lower()
+    return clean == "daily learning report"
+
+
+def _normalize_report_section(line: str) -> str:
+    clean = re.sub(r"^\d+[.)]\s*", "", line).strip().rstrip(":").strip()
+    clean = re.sub(r"^[\U0001F4B8\U0001F6E0\u26a0\ufe0f\u2705\s]+", "", clean).strip().rstrip(":").strip()
+    lower = clean.lower()
+    for key, title in _REPORT_SECTION_TITLES:
+        if lower == key:
+            return title
+    return ""
+
+
+def _normalize_report_bullet(line: str) -> str:
+    match = re.match(r"^(?:[-*]|\d+[.)])\s+(.+)$", line)
+    if not match:
+        return ""
+    return "\u2022 " + match.group(1).strip()
+
+
+def save_review_action_items_footer(
+    notes_store: Optional[NotesStore],
+    answer: str,
+    *,
+    user_id: int = 0,
+    source: str = "scheduled /review",
+) -> str:
+    if notes_store is None:
+        return ""
+    try:
+        saved = notes_store.append_review_action_items(answer, user_id=user_id, source=source)
+        count = int(saved.get("items") or 0)
+        if count > 0:
+            return f"\U0001F4DD Saved {count} action item(s) to notes.md"
+        if int(saved.get("skipped") or 0) > 0:
+            return "\U0001F4DD No new action items; already in notes.md"
+    except Exception as exc:
+        return f"\u26a0\ufe0f Could not save action items to notes.md: {exc}"
+    return ""
 
 
 def load_daily_transactions(
@@ -267,11 +350,15 @@ class ScheduledDailyReportSender:
         *,
         codex_runner: CodexReportRunner = run_codex_adhoc,
         now_provider: Callable[[], datetime] = lambda: datetime.now().astimezone(),
+        notes_store: Optional[NotesStore] = None,
     ) -> None:
         self.config = config
         self.notifier = notifier
         self.codex_runner = codex_runner
         self.now_provider = now_provider
+        self.notes_store = (
+            notes_store if notes_store is not None else (NotesStore(config) if config.notes_enabled else None)
+        )
         self.scheduler = BackgroundScheduler()
 
     def start(self) -> None:
@@ -308,7 +395,8 @@ class ScheduledDailyReportSender:
         cfg = build_daily_report_codex_config(self.config)
         question = build_daily_report_question(self.config, now, market_reason=reason)
         answer = self.codex_runner(cfg, question)
-        message = format_daily_report_message(answer, self.config.daily_report_max_reply_chars)
+        footer = save_review_action_items_footer(self.notes_store, answer, source="scheduled /review")
+        message = format_daily_report_message(answer, self.config.daily_report_max_reply_chars, footer=footer)
         self.notifier.send_message(message)
 
 

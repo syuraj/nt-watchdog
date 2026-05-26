@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from watchdog.config import WatchdogConfig, load_config
+from watchdog.notes_store import NotesStore
 from watchdog.scheduled_daily_report import (
     ScheduledDailyReportSender,
     build_daily_report_question,
@@ -58,6 +59,25 @@ class DailyReportHelpersTests(unittest.TestCase):
     def test_format_daily_report_message_strips_markdown_backticks(self) -> None:
         out = format_daily_report_message("Review `NQ` and ```logs```", 3500)
         self.assertEqual(out, "\U0001F4CA Daily learning report\n\nReview NQ and logs")
+
+    def test_format_daily_report_message_normalizes_sections_and_bullets(self) -> None:
+        out = format_daily_report_message(
+            "\U0001F4CA Daily learning report\n\n"
+            "1. \U0001F4B8 Transaction learnings:\n"
+            "- Day total: 8 closed trades.\n"
+            "2. \u2705 Action items:\n"
+            "1. Review NQ stop width.",
+            3500,
+        )
+
+        self.assertEqual(
+            out,
+            "\U0001F4CA Daily learning report\n\n"
+            "\U0001F4B8 Transaction learnings\n\n"
+            "\u2022 Day total: 8 closed trades.\n\n"
+            "\u2705 Action items\n\n"
+            "\u2022 Review NQ stop width.",
+        )
 
 
 class DailyTransactionsTests(unittest.TestCase):
@@ -208,6 +228,48 @@ class ScheduledDailyReportSenderTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("prefetched context", calls[0])
         self.assertIn("Market-day gate: market_open:test", calls[0])
+
+    def test_send_report_saves_action_items_like_manual_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            notifier = FakeNotifier()
+            now = datetime(2026, 5, 19, 19, 0, tzinfo=timezone.utc)
+            cfg = WatchdogConfig(
+                telegram_enabled=True,
+                telegram_bot_token="t",
+                telegram_chat_id="c",
+                notes_dir=str(Path(tmp) / "notes"),
+                notes_markdown_path=str(Path(tmp) / "notes.md"),
+            )
+            store = NotesStore(cfg, now_provider=lambda: now)
+            sender = ScheduledDailyReportSender(
+                cfg,
+                notifier,  # type: ignore[arg-type]
+                codex_runner=lambda _cfg, _question: "\u2705 Action items\n- Review NQ stop width",
+                now_provider=lambda: now,
+                notes_store=store,
+            )
+
+            with mock.patch(
+                "watchdog.scheduled_daily_report.is_market_session_day",
+                return_value=(True, "market_open:test"),
+            ), mock.patch(
+                "watchdog.scheduled_daily_report.build_daily_report_context",
+                return_value="prefetched context",
+            ):
+                sender._send_report()
+
+            notes_text = Path(cfg.notes_markdown_path).read_text(encoding="utf-8")
+
+        self.assertEqual(
+            notifier.messages,
+            [
+                "\U0001F4CA Daily learning report\n\n"
+                "\u2705 Action items\n\n"
+                "\u2022 Review NQ stop width\n\n"
+                "\U0001F4DD Saved 1 action item(s) to notes.md"
+            ],
+        )
+        self.assertIn("[review] Review NQ stop width", notes_text)
 
     def test_manual_review_question_builds_daily_context_without_market_skip(self) -> None:
         cfg = WatchdogConfig()

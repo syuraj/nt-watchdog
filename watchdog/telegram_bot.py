@@ -790,7 +790,11 @@ class TelegramBotService:
                 except Exception:
                     pass
                 return
-            from .scheduled_daily_report import build_daily_report_question, format_daily_report_message
+            from .scheduled_daily_report import (
+                build_daily_report_question,
+                format_daily_report_message,
+                save_review_action_items_footer,
+            )
 
             user_id = int(getattr(update.effective_user, "id", 0) or 0)
 
@@ -809,21 +813,12 @@ class TelegramBotService:
                 market_reason="manual_telegram",
             )
             answer = await await_with_typing(self.codex_queue.ask(user_id, question), send_typing)
-            footer = ""
-            if self.notes_store is not None:
-                try:
-                    saved = self.notes_store.append_review_action_items(
-                        answer,
-                        user_id=user_id,
-                        source="telegram /review",
-                    )
-                    count = int(saved.get("items") or 0)
-                    if count > 0:
-                        footer = f"\U0001F4DD Saved {count} action item(s) to notes.md"
-                    elif int(saved.get("skipped") or 0) > 0:
-                        footer = "\U0001F4DD No new action items; already in notes.md"
-                except Exception as exc:
-                    footer = f"\u26a0\ufe0f Could not save action items to notes.md: {exc}"
+            footer = save_review_action_items_footer(
+                self.notes_store,
+                answer,
+                user_id=user_id,
+                source="telegram /review",
+            )
             try:
                 await message.reply_text(
                     format_daily_report_message(
