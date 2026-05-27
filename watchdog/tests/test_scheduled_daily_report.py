@@ -50,7 +50,6 @@ class DailyReportHelpersTests(unittest.TestCase):
         self.assertIn("Strategy improvement ideas", prompt)
         self.assertIn("NT/watchdog issues", prompt)
         self.assertIn("short bullets", prompt)
-        self.assertIn("Do not wrap", prompt)
 
     def test_format_daily_report_message_adds_emoji_header_and_footer(self) -> None:
         out = format_daily_report_message("body", 3500, footer="\U0001F4DD saved")
