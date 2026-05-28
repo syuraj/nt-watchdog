@@ -122,7 +122,6 @@ def cmd_smoke_test(args: argparse.Namespace) -> None:
                 "startup_grace_sec: 999",
                 "reconnect_attempt_limit: 2",
                 "restart_cooldown_sec: 30",
-                "max_restarts_per_hour: 1",
                 f'snapshot_path: "{str(snapshot_path).replace("\\", "\\\\")}"',
                 f'events_log_path: "{str(events_path).replace("\\", "\\\\")}"',
                 "telegram_enabled: false",

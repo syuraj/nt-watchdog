@@ -16,7 +16,6 @@ reconnect_attempt_limit: 10
 notification_cooldown_sec: 900
 no_connections_recovery_cooldown_sec: 300
 restart_cooldown_sec: 120
-max_restarts_per_hour: 2
 
 # Recovery policy selected: flatten open positions, then recover.
 recovery_only_when_flat: false
@@ -62,6 +61,16 @@ daily_report_time: "19:00"
 daily_report_market_calendar: "XNYS"
 daily_report_require_market_calendar: false
 daily_report_max_reply_chars: 3500
+
+# Scheduled NT restart. Cron-like schedule using ET timezone. Calls the same
+# manual_restart path as Telegram /restart (disable strategies, force-kill,
+# relaunch, re-enable strategies). After scheduled_restart_health_delay_sec
+# the watchdog sends the current /health snapshot to Telegram.
+scheduled_restart_enabled: true
+scheduled_restart_time: "17:30"
+scheduled_restart_days: "tue,thu"
+scheduled_restart_timezone: "America/New_York"
+scheduled_restart_health_delay_sec: 60
 
 # Telegram note taking. Notes are local runtime state and are gitignored.
 notes_enabled: true

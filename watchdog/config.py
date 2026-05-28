@@ -22,7 +22,6 @@ class WatchdogConfig:
     notification_cooldown_sec: int = 900
     no_connections_recovery_cooldown_sec: int = 300
     restart_cooldown_sec: int = 120
-    max_restarts_per_hour: int = 2
     recovery_only_when_flat: bool = False
     nt_executable_path: str = r"C:\Program Files\NinjaTrader 8\bin\NinjaTrader.exe"
     nt_process_name: str = "NinjaTrader"
@@ -51,6 +50,11 @@ class WatchdogConfig:
     daily_report_market_calendar: str = "XNYS"
     daily_report_require_market_calendar: bool = False
     daily_report_max_reply_chars: int = 3500
+    scheduled_restart_enabled: bool = True
+    scheduled_restart_time: str = "17:30"
+    scheduled_restart_days: str = "tue,thu"
+    scheduled_restart_timezone: str = "America/New_York"
+    scheduled_restart_health_delay_sec: int = 60
     notes_enabled: bool = True
     notes_dir: str = "watchdog/state/notes"
     notes_markdown_path: str = "watchdog/state/notes.md"
@@ -207,6 +211,19 @@ def load_config(path: str) -> WatchdogConfig:
         cfg,
         "daily_report_max_reply_chars",
         _to_int(os.getenv("DAILY_REPORT_MAX_REPLY_CHARS"), cfg.daily_report_max_reply_chars),
+    )
+    _set_if_present(
+        cfg,
+        "scheduled_restart_enabled",
+        _to_bool(os.getenv("SCHEDULED_RESTART_ENABLED"), cfg.scheduled_restart_enabled),
+    )
+    _set_if_present(cfg, "scheduled_restart_time", os.getenv("SCHEDULED_RESTART_TIME"))
+    _set_if_present(cfg, "scheduled_restart_days", os.getenv("SCHEDULED_RESTART_DAYS"))
+    _set_if_present(cfg, "scheduled_restart_timezone", os.getenv("SCHEDULED_RESTART_TIMEZONE"))
+    _set_if_present(
+        cfg,
+        "scheduled_restart_health_delay_sec",
+        _to_int(os.getenv("SCHEDULED_RESTART_HEALTH_DELAY_SEC"), cfg.scheduled_restart_health_delay_sec),
     )
     _set_if_present(
         cfg,

@@ -86,8 +86,6 @@ class RecoveryManager:
             restarts = []
         restarts = self.state_store.prune_restart_history(restarts)
         self.runtime_state["restarts"] = restarts
-        if len(restarts) >= self.config.max_restarts_per_hour:
-            return False
         if restarts:
             last = datetime.fromisoformat(restarts[-1].replace("Z", "+00:00"))
             elapsed = (datetime.now(timezone.utc) - last).total_seconds()
@@ -668,10 +666,8 @@ class RecoveryManager:
         return result
 
     def manual_restart(self, bridge_wait_sec: int = 120) -> Dict[str, Any]:
-        """User-initiated restart from Telegram /restart. Bypasses the
-        max_restarts_per_hour breaker (manual intent overrides automation
-        heuristics) but still records a restart timestamp so the automated
-        path sees it afterwards.
+        """User-initiated restart (Telegram /restart, scheduled cron).
+        Records a restart timestamp so the automated cooldown path sees it.
         """
         if not self._manual_lock.acquire(blocking=False):
             return {"ok": False, "stop_mode": "", "strategies_toggled": 0, "error": "manual_restart_in_progress"}

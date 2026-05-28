@@ -13,6 +13,7 @@ from .nt_process import NTProcessManager
 from .recovery import RecoveryManager
 from .scheduled_daily_report import ScheduledDailyReportSender
 from .scheduled_log_scanner import ScheduledLogScanner
+from .scheduled_restart import ScheduledRestartSender
 from .scheduled_status import ScheduledStatusSender
 from .state_store import StateStore
 from .telegram_bot import TelegramBotService, TelegramSharedState
@@ -129,6 +130,25 @@ def run_watchdog(config: WatchdogConfig, max_cycles: int = 0) -> None:
     ):
         print(f"[{_now()}] daily report enabled (weekdays {config.daily_report_time})")
 
+    scheduled_restart = ScheduledRestartSender(
+        config=config,
+        notifier=notifier,
+        restart_handler=recovery.manual_restart,
+        shared_state=telegram_state,
+        bridge=bridge,
+    )
+    scheduled_restart.start()
+    if (
+        config.scheduled_restart_enabled
+        and config.telegram_enabled
+        and config.telegram_bot_token
+        and config.telegram_chat_id
+    ):
+        print(
+            f"[{_now()}] scheduled restart enabled ({config.scheduled_restart_days} "
+            f"{config.scheduled_restart_time} {config.scheduled_restart_timezone})"
+        )
+
     try:
         started = time.time()
         print(f"[{_now()}] watchdog started. bridge={config.bridge_url}")
@@ -224,6 +244,10 @@ def run_watchdog(config: WatchdogConfig, max_cycles: int = 0) -> None:
             pass
         try:
             daily_report.stop()
+        except Exception:
+            pass
+        try:
+            scheduled_restart.stop()
         except Exception:
             pass
         try:

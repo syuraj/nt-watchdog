@@ -121,7 +121,6 @@ class RecoveryTests(unittest.TestCase):
         return WatchdogConfig(
             reconnect_attempt_limit=1,
             restart_cooldown_sec=1,
-            max_restarts_per_hour=5,
             no_connections_recovery_cooldown_sec=0,
             snapshot_path=str(Path(temp_dir) / "state" / "snapshot.json"),
             events_log_path=str(Path(temp_dir) / "logs" / "events.jsonl"),
@@ -632,7 +631,6 @@ class ManualRestartTests(unittest.TestCase):
         return WatchdogConfig(
             reconnect_attempt_limit=1,
             restart_cooldown_sec=1,
-            max_restarts_per_hour=2,
             no_connections_recovery_cooldown_sec=0,
             startup_grace_sec=0,
             snapshot_path=str(Path(temp_dir) / "state" / "snapshot.json"),
@@ -640,7 +638,7 @@ class ManualRestartTests(unittest.TestCase):
             telegram_enabled=False,
         )
 
-    def test_manual_restart_bypasses_breaker(self) -> None:
+    def test_manual_restart_succeeds_with_history(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             cfg = self._build_config(td)
             state = StateStore(cfg)

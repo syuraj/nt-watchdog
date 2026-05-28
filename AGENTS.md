@@ -91,7 +91,7 @@ Live bridge (when NT running):
 Staged with circuit breaker:
 
 1. **Reconnect first** — `/recover/reconnect`, honors `reconnect_cooldown_sec`, `reconnect_attempt_limit`.
-2. **Restart fallback** — only after repeated reconnect failure. Gated by `max_restarts_per_hour`, `restart_cooldown_sec`.
+2. **Restart fallback** — only after repeated reconnect failure. Gated by `restart_cooldown_sec`.
 3. **Flatten-then-reconnect** — when open positions detected.
 4. **`no_connections_detected` special-case** — reconnect-only with `no_connections_recovery_cooldown_sec`. **Never** escalates to NT restart from this reason alone.
 
