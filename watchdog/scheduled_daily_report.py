@@ -1,4 +1,4 @@
-"""Scheduled daily learning report via read-only Codex analysis."""
+"""Scheduled daily learning report from local data, optionally summarized by Codex."""
 
 from __future__ import annotations
 
@@ -325,6 +325,99 @@ def build_daily_report_question(
     )
 
 
+def build_deterministic_daily_report(
+    config: WatchdogConfig,
+    now: Optional[datetime] = None,
+    *,
+    market_reason: str = "manual",
+) -> str:
+    """Build a concise daily report without invoking Codex.
+
+    This deliberately reports observed facts and explicit follow-ups only; it
+    does not infer trade quality or propose strategy changes from sparse data.
+    """
+    local_now = now.astimezone() if now is not None else datetime.now().astimezone()
+    day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    workdir = Path(config.telegram_adhoc_codex_workdir or ".")
+    transactions = load_daily_transactions(now=local_now)
+    activity = load_sqlite_daily_activity(now=local_now)
+
+    transaction_lines = [
+        f"• Window: {day_start.strftime('%Y-%m-%d %H:%M')}–{local_now.strftime('%H:%M %Z')}",
+        f"• Executions: {transactions.get('count', 0)}",
+    ]
+    for instrument, values in transactions.get("by_instrument", {}).items():
+        transaction_lines.append(
+            "• {instrument}: {executions} execution(s), qty {quantity}".format(
+                instrument=instrument,
+                executions=values.get("executions", 0),
+                quantity=values.get("quantity", 0),
+            )
+        )
+    if not transactions.get("count"):
+        transaction_lines.append("• No executions recorded in the local NinjaTrader database.")
+
+    strategy_lines = [
+        "• No model-generated strategy recommendations while Codex reporting is disabled.",
+        f"• SQLite activity: {_safe_json(activity, 500)}",
+    ]
+
+    issue_lines: List[str] = []
+    try:
+        health = _get_json(config.bridge_url.rstrip("/") + config.health_endpoint, timeout_sec=4)
+        issue_lines.append(f"• Health: {_safe_json(health, 700)}")
+    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        issue_lines.append(f"• Health endpoint unavailable: {type(exc).__name__}")
+    try:
+        runtime = _get_json(config.bridge_url.rstrip("/") + config.runtime_snapshot_endpoint, timeout_sec=6)
+        issue_lines.append(f"• Runtime: {_safe_json(_runtime_summary(runtime), 700)}")
+    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        issue_lines.append(f"• Runtime snapshot unavailable: {type(exc).__name__}")
+
+    events_path = Path(config.events_log_path)
+    if not events_path.is_absolute():
+        events_path = workdir / events_path
+    event_lines = _tail_jsonl_since(events_path, day_start, max_lines=5)
+    if event_lines:
+        issue_lines.append(f"• Watchdog events today: {len(event_lines)} (latest {event_lines[-1]})")
+    else:
+        issue_lines.append("• Watchdog events today: none found.")
+
+    candidate_logs: List[Path] = []
+    watchdog_logs = workdir / "watchdog" / "logs"
+    if watchdog_logs.exists():
+        candidate_logs.extend(_recent_log_files(watchdog_logs.glob("*.log"), day_start))
+    nt_logs = Path.home() / "Documents" / "NinjaTrader 8" / "log"
+    if nt_logs.exists():
+        candidate_logs.extend(_recent_log_files(nt_logs.glob("log.*.txt"), day_start)[:8])
+    matches = _matching_lines(candidate_logs, max_lines=5)
+    if matches:
+        issue_lines.append(f"• Error-like log entries: {len(matches)} (latest {matches[-1]})")
+    else:
+        issue_lines.append("• Error-like log entries: none found in scanned logs.")
+
+    action_lines: List[str] = []
+    if event_lines:
+        action_lines.append("• Review today’s watchdog events before the next session.")
+    if matches:
+        action_lines.append("• Review the latest error-like NT/watchdog log entry.")
+    if not transactions.get("count"):
+        action_lines.append("• Confirm that no executions is expected for this session.")
+    if not action_lines:
+        action_lines.append("• No follow-up action identified from local data.")
+    action_lines.append(f"• Market-day gate: {market_reason}.")
+
+    return "\n\n".join(
+        [
+            "📸 Deterministic report (Codex disabled)",
+            "💸 Transaction learnings\n" + "\n".join(transaction_lines),
+            "🛠️ Strategy improvement ideas\n" + "\n".join(strategy_lines),
+            "⚠️ NT/watchdog issues\n" + "\n".join(issue_lines),
+            "✅ Action items\n" + "\n".join(action_lines),
+        ]
+    )
+
+
 def build_daily_report_codex_config(config: WatchdogConfig) -> CodexAdhocConfig:
     return CodexAdhocConfig(
         command=config.telegram_adhoc_codex_command,
@@ -390,9 +483,12 @@ class ScheduledDailyReportSender:
         if not should_run:
             return
 
-        cfg = build_daily_report_codex_config(self.config)
-        question = build_daily_report_question(self.config, now, market_reason=reason)
-        answer = self.codex_runner(cfg, question)
+        if self.config.telegram_adhoc_codex_enabled:
+            cfg = build_daily_report_codex_config(self.config)
+            question = build_daily_report_question(self.config, now, market_reason=reason)
+            answer = self.codex_runner(cfg, question)
+        else:
+            answer = build_deterministic_daily_report(self.config, now, market_reason=reason)
         footer = save_review_action_items_footer(self.notes_store, answer, source="scheduled /review")
         message = format_daily_report_message(answer, self.config.daily_report_max_reply_chars, footer=footer)
         self.notifier.send_message(message)

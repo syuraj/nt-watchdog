@@ -10,6 +10,7 @@ from watchdog.config import WatchdogConfig, load_config
 from watchdog.notes_store import NotesStore
 from watchdog.scheduled_daily_report import (
     ScheduledDailyReportSender,
+    build_deterministic_daily_report,
     build_daily_report_question,
     build_daily_report_prompt,
     format_daily_report_message,
@@ -77,6 +78,35 @@ class DailyReportHelpersTests(unittest.TestCase):
             "\u2705 Action items\n\n"
             "\u2022 Review NQ stop width.",
         )
+
+    def test_deterministic_report_is_fact_only_and_marks_codex_disabled(self) -> None:
+        cfg = WatchdogConfig(telegram_adhoc_codex_workdir=".")
+        now = datetime(2026, 5, 19, 19, 0, tzinfo=timezone.utc)
+        with mock.patch(
+            "watchdog.scheduled_daily_report.load_daily_transactions",
+            return_value={
+                "count": 2,
+                "by_instrument": {"NQ": {"executions": 2, "quantity": 2}},
+            },
+        ), mock.patch(
+            "watchdog.scheduled_daily_report.load_sqlite_daily_activity",
+            return_value={"executions": 2},
+        ), mock.patch(
+            "watchdog.scheduled_daily_report._get_json",
+            side_effect=[{"ok": True}, {"accounts": []}],
+        ), mock.patch(
+            "watchdog.scheduled_daily_report._tail_jsonl_since",
+            return_value=[],
+        ), mock.patch(
+            "watchdog.scheduled_daily_report._matching_lines",
+            return_value=[],
+        ):
+            out = build_deterministic_daily_report(cfg, now, market_reason="market_open:test")
+
+        self.assertIn("Deterministic report (Codex disabled)", out)
+        self.assertIn("NQ: 2 execution(s), qty 2", out)
+        self.assertIn("No model-generated strategy recommendations", out)
+        self.assertIn("Market-day gate: market_open:test", out)
 
 
 class DailyTransactionsTests(unittest.TestCase):
@@ -227,6 +257,33 @@ class ScheduledDailyReportSenderTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("prefetched context", calls[0])
         self.assertIn("Market-day gate: market_open:test", calls[0])
+
+    def test_send_report_uses_local_fallback_when_codex_is_disabled(self) -> None:
+        notifier = FakeNotifier()
+        cfg = WatchdogConfig(
+            telegram_enabled=True,
+            telegram_bot_token="t",
+            telegram_chat_id="c",
+            telegram_adhoc_codex_enabled=False,
+        )
+        sender = ScheduledDailyReportSender(
+            cfg,
+            notifier,  # type: ignore[arg-type]
+            codex_runner=lambda _cfg, _question: self.fail("Codex must not run when disabled"),
+            now_provider=lambda: datetime(2026, 5, 19, 19, 0, tzinfo=timezone.utc),
+        )
+
+        with mock.patch(
+            "watchdog.scheduled_daily_report.is_market_session_day",
+            return_value=(True, "market_open:test"),
+        ), mock.patch(
+            "watchdog.scheduled_daily_report.build_deterministic_daily_report",
+            return_value="local report body",
+        ) as fallback:
+            sender._send_report()
+
+        fallback.assert_called_once()
+        self.assertEqual(notifier.messages, ["\U0001F4CA Daily learning report\n\nlocal report body"])
 
     def test_send_report_saves_action_items_like_manual_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

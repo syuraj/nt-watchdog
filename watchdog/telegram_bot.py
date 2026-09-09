@@ -785,8 +785,33 @@ class TelegramBotService:
         async def cmd_review(update, context) -> None:  # type: ignore[no-untyped-def]
             message = update.effective_message
             if self.codex_queue is None:
+                from .scheduled_daily_report import (
+                    build_deterministic_daily_report,
+                    format_daily_report_message,
+                    save_review_action_items_footer,
+                )
+
+                user_id = int(getattr(update.effective_user, "id", 0) or 0)
                 try:
-                    await message.reply_text("Codex daily review is disabled.")
+                    answer = await asyncio.to_thread(
+                        build_deterministic_daily_report,
+                        self.config,
+                        None,
+                        market_reason="manual_telegram",
+                    )
+                    footer = save_review_action_items_footer(
+                        self.notes_store,
+                        answer,
+                        user_id=user_id,
+                        source="telegram /review",
+                    )
+                    await message.reply_text(
+                        format_daily_report_message(
+                            answer,
+                            self.config.daily_report_max_reply_chars,
+                            footer=footer,
+                        )
+                    )
                 except Exception:
                     pass
                 return
