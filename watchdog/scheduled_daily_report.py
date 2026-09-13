@@ -342,46 +342,54 @@ def build_deterministic_daily_report(
     transactions = load_daily_transactions(now=local_now)
     activity = load_sqlite_daily_activity(now=local_now)
 
+    bullet = "\u2022 "
     transaction_lines = [
-        f"• Window: {day_start.strftime('%Y-%m-%d %H:%M')}–{local_now.strftime('%H:%M %Z')}",
-        f"• Executions: {transactions.get('count', 0)}",
+        f"{bullet}Window: {day_start.strftime('%Y-%m-%d %H:%M')} - {local_now.strftime('%H:%M %Z')}",
+        f"{bullet}Executions: {transactions.get('count', 0)}",
     ]
     for instrument, values in transactions.get("by_instrument", {}).items():
         transaction_lines.append(
-            "• {instrument}: {executions} execution(s), qty {quantity}".format(
+            "{bullet}{instrument}: {executions} executions, qty {quantity}".format(
+                bullet=bullet,
                 instrument=instrument,
                 executions=values.get("executions", 0),
                 quantity=values.get("quantity", 0),
             )
         )
     if not transactions.get("count"):
-        transaction_lines.append("• No executions recorded in the local NinjaTrader database.")
+        transaction_lines.append(f"{bullet}No executions recorded in the local NinjaTrader database.")
+
+    for row in activity:
+        transaction_lines.append(f"{bullet}{_format_activity_summary(row)}")
+    if not activity:
+        transaction_lines.append(f"{bullet}No SQLite account activity recorded.")
 
     strategy_lines = [
-        "• No model-generated strategy recommendations while Codex reporting is disabled.",
-        f"• SQLite activity: {_safe_json(activity, 500)}",
+        f"{bullet}No strategy improvement identified from local facts.",
     ]
 
     issue_lines: List[str] = []
     try:
         health = _get_json(config.bridge_url.rstrip("/") + config.health_endpoint, timeout_sec=4)
-        issue_lines.append(f"• Health: {_safe_json(health, 700)}")
+        issue_lines.append(f"{bullet}Health: {_format_health_summary(health)}")
     except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
-        issue_lines.append(f"• Health endpoint unavailable: {type(exc).__name__}")
+        issue_lines.append(f"{bullet}Health unavailable: {type(exc).__name__}")
     try:
         runtime = _get_json(config.bridge_url.rstrip("/") + config.runtime_snapshot_endpoint, timeout_sec=6)
-        issue_lines.append(f"• Runtime: {_safe_json(_runtime_summary(runtime), 700)}")
+        issue_lines.append(f"{bullet}Runtime: {_format_runtime_summary(runtime)}")
     except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
-        issue_lines.append(f"• Runtime snapshot unavailable: {type(exc).__name__}")
+        issue_lines.append(f"{bullet}Runtime unavailable: {type(exc).__name__}")
 
     events_path = Path(config.events_log_path)
     if not events_path.is_absolute():
         events_path = workdir / events_path
     event_lines = _tail_jsonl_since(events_path, day_start, max_lines=5)
     if event_lines:
-        issue_lines.append(f"• Watchdog events today: {len(event_lines)} (latest {event_lines[-1]})")
+        issue_lines.append(
+            f"{bullet}Watchdog events: {len(event_lines)} today; latest {_summarize_event(event_lines[-1])}"
+        )
     else:
-        issue_lines.append("• Watchdog events today: none found.")
+        issue_lines.append(f"{bullet}Watchdog events: none found today.")
 
     candidate_logs: List[Path] = []
     watchdog_logs = workdir / "watchdog" / "logs"
@@ -392,30 +400,117 @@ def build_deterministic_daily_report(
         candidate_logs.extend(_recent_log_files(nt_logs.glob("log.*.txt"), day_start)[:8])
     matches = _matching_lines(candidate_logs, max_lines=5)
     if matches:
-        issue_lines.append(f"• Error-like log entries: {len(matches)} (latest {matches[-1]})")
+        issue_lines.append(
+            f"{bullet}Error-like logs: {len(matches)}; latest {_shorten(matches[-1], 180)}"
+        )
     else:
-        issue_lines.append("• Error-like log entries: none found in scanned logs.")
+        issue_lines.append(f"{bullet}Error-like logs: none found in scanned logs.")
 
     action_lines: List[str] = []
     if event_lines:
-        action_lines.append("• Review today’s watchdog events before the next session.")
+        action_lines.append(f"{bullet}Review today's watchdog events before the next session.")
     if matches:
-        action_lines.append("• Review the latest error-like NT/watchdog log entry.")
+        action_lines.append(f"{bullet}Review the latest error-like NT/watchdog log entry.")
     if not transactions.get("count"):
-        action_lines.append("• Confirm that no executions is expected for this session.")
+        action_lines.append(f"{bullet}Confirm that no executions is expected for this session.")
     if not action_lines:
-        action_lines.append("• No follow-up action identified from local data.")
-    action_lines.append(f"• Market-day gate: {market_reason}.")
+        action_lines.append(f"{bullet}No follow-up action identified from local data.")
+    action_lines.append(f"{bullet}Market-day gate: {market_reason}.")
 
     return "\n\n".join(
         [
-            "📸 Deterministic report (Codex disabled)",
             "💸 Transaction learnings\n" + "\n".join(transaction_lines),
             "🛠️ Strategy improvement ideas\n" + "\n".join(strategy_lines),
             "⚠️ NT/watchdog issues\n" + "\n".join(issue_lines),
             "✅ Action items\n" + "\n".join(action_lines),
         ]
     )
+
+
+def _format_activity_summary(row: Any) -> str:
+    if not isinstance(row, dict):
+        return "SQLite activity: unavailable"
+    account = str(row.get("account") or "Unknown account")
+    executions = _safe_int(row.get("executions"))
+    closed = _safe_int(row.get("sqlite_closed_trades"))
+    wins = _safe_int(row.get("sqlite_wins"))
+    losses = _safe_int(row.get("sqlite_losses"))
+    details = [f"{account}: {executions} exec"]
+    if closed:
+        details.append(f"{closed} closed ({wins}W/{losses}L)")
+    if "sqlite_realized_pnl" in row:
+        details.append(f"PnL {_format_money(row.get('sqlite_realized_pnl'))}")
+    return ", ".join(details)
+
+
+def _format_health_summary(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return "unavailable"
+    parts = [str(payload.get("status") or "unknown")]
+    connections = payload.get("connections")
+    if isinstance(connections, dict):
+        connected = connections.get("connected")
+        total = connections.get("total")
+        if connected is not None and total is not None:
+            parts.append(f"connections {connected}/{total}")
+        configured = connections.get("configured")
+        if configured is not None and configured != total:
+            parts.append(f"configured {configured}")
+    age = payload.get("mainthread_age_sec")
+    if age is not None:
+        parts.append(f"main thread {age}s")
+    reasons = payload.get("reasons")
+    if isinstance(reasons, list) and reasons:
+        parts.append("reasons " + ", ".join(_shorten(str(reason), 60) for reason in reasons[:3]))
+    return "; ".join(parts)
+
+
+def _format_runtime_summary(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return "unavailable"
+    parts: List[str] = []
+    accounts = payload.get("accounts")
+    if isinstance(accounts, list):
+        connected = sum(1 for account in accounts if isinstance(account, dict) and account.get("connected"))
+        parts.append(f"{connected}/{len(accounts)} accounts connected")
+    positions = payload.get("positions")
+    if isinstance(positions, list):
+        parts.append(f"{len(positions)} open positions")
+    strategy_runtime = payload.get("strategy_runtime")
+    if isinstance(strategy_runtime, dict) and isinstance(strategy_runtime.get("strategies"), list):
+        parts.append(f"{len(strategy_runtime['strategies'])} strategies")
+    return "; ".join(parts) if parts else "no summary available"
+
+
+def _summarize_event(value: str) -> str:
+    try:
+        event = json.loads(value)
+    except json.JSONDecodeError:
+        return _shorten(value, 180)
+    if not isinstance(event, dict):
+        return _shorten(value, 180)
+    result = event.get("result")
+    if isinstance(result, dict):
+        state = result.get("state")
+        action = result.get("action")
+        if state or action:
+            return _shorten(f"{action or 'none'} / {state or 'unknown'}", 180)
+    return _shorten(str(event.get("kind") or event.get("health_status") or "event"), 180)
+
+
+def _format_money(value: Any) -> str:
+    try:
+        amount = float(value or 0)
+    except (TypeError, ValueError):
+        return "unknown"
+    return f"${amount:,.2f}"
+
+
+def _shorten(value: str, max_chars: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
 
 
 def build_daily_report_codex_config(config: WatchdogConfig) -> CodexAdhocConfig:

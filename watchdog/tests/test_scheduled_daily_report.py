@@ -79,7 +79,7 @@ class DailyReportHelpersTests(unittest.TestCase):
             "\u2022 Review NQ stop width.",
         )
 
-    def test_deterministic_report_is_fact_only_and_marks_codex_disabled(self) -> None:
+    def test_deterministic_report_is_compact_and_fact_only(self) -> None:
         cfg = WatchdogConfig(telegram_adhoc_codex_workdir=".")
         now = datetime(2026, 5, 19, 19, 0, tzinfo=timezone.utc)
         with mock.patch(
@@ -90,7 +90,15 @@ class DailyReportHelpersTests(unittest.TestCase):
             },
         ), mock.patch(
             "watchdog.scheduled_daily_report.load_sqlite_daily_activity",
-            return_value={"executions": 2},
+            return_value=[
+                {
+                    "account": "Sim",
+                    "executions": 2,
+                    "sqlite_closed_trades": 1,
+                    "sqlite_wins": 1,
+                    "sqlite_realized_pnl": 125.5,
+                }
+            ],
         ), mock.patch(
             "watchdog.scheduled_daily_report._get_json",
             side_effect=[{"ok": True}, {"accounts": []}],
@@ -103,10 +111,51 @@ class DailyReportHelpersTests(unittest.TestCase):
         ):
             out = build_deterministic_daily_report(cfg, now, market_reason="market_open:test")
 
-        self.assertIn("Deterministic report (Codex disabled)", out)
-        self.assertIn("NQ: 2 execution(s), qty 2", out)
-        self.assertIn("No model-generated strategy recommendations", out)
+        self.assertNotIn("Deterministic report", out)
+        self.assertIn("NQ: 2 executions, qty 2", out)
+        self.assertIn("Sim: 2 exec, 1 closed (1W/0L), PnL $125.50", out)
+        self.assertIn("No strategy improvement identified from local facts", out)
         self.assertIn("Market-day gate: market_open:test", out)
+
+    def test_deterministic_report_summarizes_health_runtime_events_and_logs(self) -> None:
+        cfg = WatchdogConfig(telegram_adhoc_codex_workdir=".")
+        now = datetime(2026, 5, 19, 19, 0, tzinfo=timezone.utc)
+        with mock.patch(
+            "watchdog.scheduled_daily_report.load_daily_transactions",
+            return_value={"count": 0, "by_instrument": {}},
+        ), mock.patch(
+            "watchdog.scheduled_daily_report.load_sqlite_daily_activity",
+            return_value=[],
+        ), mock.patch(
+            "watchdog.scheduled_daily_report._get_json",
+            side_effect=[
+                {
+                    "status": "ok",
+                    "connections": {"connected": 1, "total": 1, "configured": 4},
+                    "mainthread_age_sec": 0.8,
+                },
+                {
+                    "accounts": [{"connected": True}, {"connected": False}],
+                    "positions": [],
+                    "strategy_runtime": {"strategies": [{"name": "Test"}]},
+                },
+            ],
+        ), mock.patch(
+            "watchdog.scheduled_daily_report._tail_jsonl_since",
+            return_value=[
+                '{"kind":"cycle","result":{"action":"none","state":"healthy"}}'
+            ],
+        ), mock.patch(
+            "watchdog.scheduled_daily_report._matching_lines",
+            return_value=["C:\\nt.log:1: warning: " + ("x" * 220)],
+        ):
+            out = build_deterministic_daily_report(cfg, now, market_reason="market_open:test")
+
+        self.assertIn("Health: ok; connections 1/1; configured 4; main thread 0.8s", out)
+        self.assertIn("Runtime: 1/2 accounts connected; 0 open positions; 1 strategies", out)
+        self.assertIn("Watchdog events: 1 today; latest none / healthy", out)
+        self.assertIn("Error-like logs: 1; latest C:\\nt.log:1: warning:", out)
+        self.assertLess(len(out), 1800)
 
 
 class DailyTransactionsTests(unittest.TestCase):
