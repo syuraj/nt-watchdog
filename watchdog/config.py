@@ -16,6 +16,8 @@ class WatchdogConfig:
     connection_names: List[str] = field(default_factory=list)
     poll_interval_sec: int = 60
     startup_grace_sec: int = 90
+    nt_launch_retry_base_sec: int = 60
+    nt_launch_retry_max_sec: int = 1800
     mainthread_stuck_sec: int = 12
     unstable_cycles_before_recovery: int = 3
     reconnect_attempt_limit: int = 10

@@ -157,8 +157,14 @@ class NTProcessManager:
             return False
 
         try:
-            subprocess.Popen([exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc = subprocess.Popen([exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
+            return False
+        # Catch launchers that exit immediately (bad executable, startup error,
+        # etc.) so the watchdog applies launch backoff instead of treating the
+        # spawn itself as a successful start.
+        time.sleep(1)
+        if proc.poll() is not None:
             return False
         self._spawn_login_helper()
         return True

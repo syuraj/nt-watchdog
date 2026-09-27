@@ -190,8 +190,15 @@ def run_watchdog(config: WatchdogConfig, max_cycles: int = 0) -> None:
                     f"[{_now()}] bootstrap action={result.get('action')} reason={result.get('reason')} "
                     f"bridge_up={result.get('bridge_up')} strategies_toggled={result.get('strategies_toggled')}{alert_suffix}"
                 )
-                if result.get("action") != "start_failed":
+                if result.get("action") in {"start_failed", "start_retry_wait"}:
+                    sleep_sec = max(1, int(result.get("sleep_override_sec") or config.poll_interval_sec))
+                    print(f"[{_now()}] NT launch retry in {sleep_sec}s")
+                    time.sleep(sleep_sec)
                     continue
+                # Give a newly launched process time to initialize before the next
+                # process check; otherwise an early exit can trigger a tight loop.
+                time.sleep(max(1, config.poll_interval_sec))
+                continue
 
             result = recovery.handle_cycle(health=health, runtime_snapshot=runtime_snapshot)
             conn = health.get("connections", {}) if isinstance(health, dict) else {}

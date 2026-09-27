@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+import math
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from uuid import uuid4
@@ -264,8 +265,34 @@ class RecoveryManager:
     def bootstrap_start(self, bridge_wait_sec: Optional[int] = None) -> Dict[str, Any]:
         incident_id = uuid4().hex[:10]
         reason = "process_not_running"
+        retry_at = str(self.runtime_state.get("nt_launch_retry_at_utc", "") or "")
+        if retry_at:
+            try:
+                retry_time = datetime.fromisoformat(retry_at.replace("Z", "+00:00"))
+                remaining = math.ceil((retry_time - datetime.now(timezone.utc)).total_seconds())
+            except Exception:
+                remaining = 0
+            if remaining > 0:
+                return {
+                    "state": "degraded",
+                    "action": "start_retry_wait",
+                    "reason": "nt_launch_backoff",
+                    "incident_id": incident_id,
+                    "sleep_override_sec": remaining,
+                }
         if not self.process_manager.start():
-            self.state_store.append_event({"kind": "process_start", "status": "failed", "reason": reason})
+            failures = int(self.runtime_state.get("nt_launch_failures", 0) or 0) + 1
+            base = max(1, int(self.config.nt_launch_retry_base_sec))
+            cap = max(base, int(self.config.nt_launch_retry_max_sec))
+            delay = min(base * (2 ** min(failures - 1, 30)), cap)
+            retry_at = datetime.fromtimestamp(time.time() + delay, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self.runtime_state["nt_launch_failures"] = failures
+            self.runtime_state["nt_launch_retry_at_utc"] = retry_at
+            self._persist_runtime()
+            self.state_store.append_event({
+                "kind": "process_start", "status": "failed", "reason": reason,
+                "failure_count": failures, "retry_delay_sec": delay, "retry_at_utc": retry_at,
+            })
             return {
                 "state": "degraded",
                 "action": "start_failed",
@@ -273,8 +300,13 @@ class RecoveryManager:
                 "incident_id": incident_id,
                 "bridge_up": False,
                 "strategies_toggled": 0,
+                "sleep_override_sec": delay,
+                "launch_failures": failures,
             }
 
+        self.runtime_state.pop("nt_launch_failures", None)
+        self.runtime_state.pop("nt_launch_retry_at_utc", None)
+        self._persist_runtime()
         self.state_store.append_event({"kind": "process_start", "status": "success", "reason": reason})
         notify_meta = self._notify(
             "process_started",
