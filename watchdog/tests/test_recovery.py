@@ -151,6 +151,39 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(process.restart_calls, 0)
             self.assertEqual(bridge.calls, 1)
 
+    def test_bridge_unreachable_uses_persistent_exponential_backoff(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            cfg.poll_interval_sec = 60
+            cfg.recovery_retry_max_sec = 1800
+            state = StateStore(cfg)
+            bridge = FakeBridge([
+                {"success": False, "error": "<urlopen error [WinError 10061] connection refused"},
+                {"success": False, "error": "<urlopen error [WinError 10061] connection refused"},
+                {"success": False, "error": "<urlopen error [WinError 10061] connection refused"},
+            ])
+            process = FakeProcessManager()
+            notifier = FakeNotifier()
+            manager = self._make_manager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=notifier,  # type: ignore[arg-type]
+            )
+            health = {"status": "degraded", "reasons": ["connection_unstable"]}
+
+            first = manager.handle_cycle(health=health, runtime_snapshot={"positions": []})
+            second = manager.handle_cycle(health=health, runtime_snapshot={"positions": []})
+            self.assertEqual(first["sleep_override_sec"], 60)
+            self.assertEqual(second["sleep_override_sec"], 120)
+            self.assertEqual(state.load_runtime_state()["bridge_unreachable_failures"], 2)
+
+            manager.handle_cycle(health={"status": "ok", "reasons": []}, runtime_snapshot={})
+            third = manager.handle_cycle(health=health, runtime_snapshot={"positions": []})
+            self.assertEqual(third["sleep_override_sec"], 60)
+            self.assertEqual(state.load_runtime_state()["bridge_unreachable_failures"], 1)
+
     def test_stuck_triggers_rdp_redirect_before_reconnect(self) -> None:
         """When /healthz reports main_thread_unresponsive, watchdog should try
         to redirect the disconnected RDP session to console BEFORE calling
@@ -332,6 +365,36 @@ class RecoveryTests(unittest.TestCase):
 
             self.assertEqual(result["action"], "notify_only")
             self.assertEqual(result["reason"], "no_connections_reconnect_failed")
+            self.assertEqual(process.restart_calls, 0)
+
+    def test_no_connections_retry_cooldown_grows_exponentially(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            cfg.no_connections_recovery_cooldown_sec = 60
+            state = StateStore(cfg)
+            bridge = FakeBridge([
+                {"success": False, "error": "reconnect failed"},
+                {"success": False, "error": "reconnect failed"},
+            ])
+            process = FakeProcessManager()
+            manager = self._make_manager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=FakeNotifier(),  # type: ignore[arg-type]
+            )
+            health = {"status": "degraded", "reasons": ["no_connections_detected"]}
+
+            first = manager.handle_cycle(health=health, runtime_snapshot={"positions": []})
+            self.assertEqual(first["sleep_override_sec"], 60)
+
+            runtime = state.load_runtime_state()
+            runtime["last_no_connections_recovery_utc"] = "2000-01-01T00:00:00Z"
+            state.save_runtime_state(runtime)
+            second = manager.handle_cycle(health=health, runtime_snapshot={"positions": []})
+
+            self.assertEqual(second["sleep_override_sec"], 120)
             self.assertEqual(process.restart_calls, 0)
 
     def test_cooldown_not_started_when_send_fails(self) -> None:

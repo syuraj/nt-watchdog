@@ -400,23 +400,34 @@ class RecoveryManager:
         result.update(notify_meta)
         return result
 
-    def _should_attempt_no_connections_recovery(self) -> bool:
-        cooldown = int(getattr(self.config, "no_connections_recovery_cooldown_sec", 0) or 0)
-        if cooldown <= 0:
-            return True
+    def _no_connections_retry_remaining(self) -> int:
+        """Return remaining exponential cooldown before a no-connections retry."""
+        attempts = int(self.runtime_state.get("no_connections_recovery_attempts", 0) or 0)
+        if attempts <= 0:
+            return 0
+        base = max(0, int(getattr(self.config, "no_connections_recovery_cooldown_sec", 0) or 0))
+        if base <= 0:
+            return 0
+        cap = max(base, int(getattr(self.config, "recovery_retry_max_sec", 1800) or 1800))
+        cooldown = min(base * (2 ** min(attempts - 1, 30)), cap)
         now = datetime.now(timezone.utc)
-        key = "last_no_connections_recovery_utc"
-        raw = self.runtime_state.get(key, "")
+        raw = self.runtime_state.get("last_no_connections_recovery_utc", "")
         if isinstance(raw, str) and raw:
             try:
                 ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-                if (now - ts).total_seconds() < cooldown:
-                    return False
+                return max(0, math.ceil(cooldown - (now - ts).total_seconds()))
             except Exception:
                 pass
-        self.runtime_state[key] = _utc_now()
+        return 0
+
+    def _record_no_connections_recovery_attempt(self) -> None:
+        self.runtime_state["last_no_connections_recovery_utc"] = _utc_now()
         self._persist_runtime()
-        return True
+
+    def _retry_delay(self, failure_count: int, base_sec: int) -> int:
+        base = max(1, int(base_sec))
+        cap = max(base, int(getattr(self.config, "recovery_retry_max_sec", 1800) or 1800))
+        return min(base * (2 ** min(max(0, failure_count - 1), 30)), cap)
 
     def handle_cycle(self, health: Dict[str, Any], runtime_snapshot: Dict[str, Any]) -> Dict[str, Any]:
         self.runtime_state = self.state_store.load_runtime_state()
@@ -428,6 +439,8 @@ class RecoveryManager:
         if status == "ok":
             prior_incident = self.runtime_state.get("last_incident_id", "")
             self.runtime_state["reconnect_failures"] = 0
+            self.runtime_state.pop("bridge_unreachable_failures", None)
+            self.runtime_state.pop("no_connections_recovery_attempts", None)
             strategy_enable_info = {}
             pending_strategy_enable = self.runtime_state.get("strategy_enable_pending")
             if isinstance(pending_strategy_enable, dict):
@@ -494,22 +507,28 @@ class RecoveryManager:
             # Fall through to the normal reconnect/restart flow if redirect failed.
 
         no_connections = isinstance(reasons, list) and "no_connections_detected" in reasons
-        if no_connections and not self._should_attempt_no_connections_recovery():
-            return self._degraded_notify(
+        no_connections_wait = self._no_connections_retry_remaining() if no_connections else 0
+        if no_connections and no_connections_wait > 0:
+            result = self._degraded_notify(
                 event_type="no_connections_detected",
                 status=status,
                 reason="no_connections_detected_cooldown",
                 incident_id=incident_id,
                 log_event=True,
             )
+            result["sleep_override_sec"] = no_connections_wait
+            return result
 
         # Safety policy: if there are no NT connections, attempt reconnect only.
         # Do not escalate to process restart from this reason alone.
         if no_connections:
+            attempts = int(self.runtime_state.get("no_connections_recovery_attempts", 0) or 0) + 1
+            self.runtime_state["no_connections_recovery_attempts"] = attempts
+            self._record_no_connections_recovery_attempt()
             attempt = self._attempt_reconnect(runtime_snapshot, extra_event={"reason": "no_connections_detected"})
             self.runtime_state["reconnect_failures"] = 0
-            self._persist_runtime()
             if attempt["success"]:
+                self._persist_runtime()
                 time.sleep(self.post_reconnect_delay_sec)
                 strat_result = self.bridge.enable_all_strategies()
                 self.state_store.append_event(
@@ -540,28 +559,39 @@ class RecoveryManager:
                 return result
 
             # Keep restart path disabled for no-connections incidents.
-            return self._degraded_notify(
+            self._persist_runtime()
+            result = self._degraded_notify(
                 event_type="no_connections_detected",
                 status=status,
                 reason="no_connections_reconnect_failed",
                 incident_id=incident_id,
                 log_event=True,
             )
+            result["sleep_override_sec"] = self._retry_delay(
+                attempts,
+                int(getattr(self.config, "no_connections_recovery_cooldown_sec", 300) or 300),
+            )
+            return result
 
         attempt = self._attempt_reconnect(runtime_snapshot)
         reconnect_ok = attempt["success"]
         if attempt["bridge_unreachable"]:
-            # Skip counter increment + escalation; wait for bootstrap path to revive NT.
+            # The bridge may be unreachable while NT is still running. Back off
+            # these repeated checks too, and keep the counter across watchdog restarts.
+            failures = int(self.runtime_state.get("bridge_unreachable_failures", 0) or 0) + 1
+            self.runtime_state["bridge_unreachable_failures"] = failures
+            self._persist_runtime()
             result = {
                 "state": "degraded",
                 "action": "wait_for_bridge",
                 "reason": "bridge_unreachable",
                 "incident_id": incident_id,
-                "sleep_override_sec": self.config.poll_interval_sec,
+                "sleep_override_sec": self._retry_delay(failures, self.config.poll_interval_sec),
             }
             return result
         if reconnect_ok:
             self.runtime_state["reconnect_failures"] = 0
+            self.runtime_state.pop("bridge_unreachable_failures", None)
             self._persist_runtime()
             # Give NT time for account/broker subscription to finish after the
             # connection reports Connected — strategy activation fails silently
@@ -598,6 +628,7 @@ class RecoveryManager:
             return result
 
         failures = int(self.runtime_state.get("reconnect_failures", 0)) + 1
+        self.runtime_state.pop("bridge_unreachable_failures", None)
         self.runtime_state["reconnect_failures"] = failures
         self._persist_runtime()
 
