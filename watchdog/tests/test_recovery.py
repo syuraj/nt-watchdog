@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -183,6 +184,47 @@ class RecoveryTests(unittest.TestCase):
             third = manager.handle_cycle(health=health, runtime_snapshot={"positions": []})
             self.assertEqual(third["sleep_override_sec"], 60)
             self.assertEqual(state.load_runtime_state()["bridge_unreachable_failures"], 1)
+
+    def test_restart_cooldown_backoff_persists_until_health_recovers(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            cfg.reconnect_attempt_limit = 3
+            cfg.restart_cooldown_sec = 60
+            cfg.recovery_retry_max_sec = 600
+            state = StateStore(cfg)
+            runtime = state.load_runtime_state()
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            runtime["restarts"] = [now]
+            runtime["restart_recovery_attempts"] = 2
+            runtime["reconnect_failures"] = 2
+            state.save_runtime_state(runtime)
+
+            bridge = FakeBridge([{"success": False, "error": "reconnect failed"}])
+            process = FakeProcessManager()
+            manager = self._make_manager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,  # type: ignore[arg-type]
+                state_store=state,
+                notifier=FakeNotifier(),  # type: ignore[arg-type]
+            )
+
+            manager.runtime_state["restart_recovery_attempts"] = 1
+            self.assertGreaterEqual(manager._restart_cooldown_remaining(), 59)
+            self.assertLessEqual(manager._restart_cooldown_remaining(), 60)
+
+            result = manager.handle_cycle(
+                health={"status": "degraded", "reasons": ["connection_unstable"]},
+                runtime_snapshot={"positions": []},
+            )
+
+            self.assertEqual(result["reason"], "restart_circuit_breaker_open")
+            self.assertGreaterEqual(result["sleep_override_sec"], 119)
+            self.assertLessEqual(result["sleep_override_sec"], 120)
+            self.assertEqual(process.restart_calls, 0)
+
+            manager.handle_cycle(health={"status": "ok", "reasons": []}, runtime_snapshot={})
+            self.assertEqual(state.load_runtime_state()["restart_recovery_attempts"], 0)
 
     def test_stuck_triggers_rdp_redirect_before_reconnect(self) -> None:
         """When /healthz reports main_thread_unresponsive, watchdog should try

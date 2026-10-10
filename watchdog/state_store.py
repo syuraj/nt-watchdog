@@ -39,7 +39,13 @@ class StateStore:
     def load_runtime_state(self) -> Dict[str, Any]:
         return self._read_json(
             self.runtime_state_file,
-            default={"restarts": [], "reconnect_failures": 0, "last_incident_id": "", "nt_launch_failures": 0},
+            default={
+                "restarts": [],
+                "reconnect_failures": 0,
+                "restart_recovery_attempts": 0,
+                "last_incident_id": "",
+                "nt_launch_failures": 0,
+            },
         )
 
     def save_runtime_state(self, payload: Dict[str, Any]) -> None:

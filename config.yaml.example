@@ -1,4 +1,9 @@
 # Copy to config.yaml (repo root) and customize.
+# Used by `python scripts/manage_watchdog.py deploy`.
+deploy_server_ip: ""
+deploy_ssh_user: "Administrator"
+deploy_remote_root: 'C:\Users\Administrator\Documents\nt-watchdog'
+
 bridge_url: "http://localhost:8899"
 health_endpoint: "/healthz"
 runtime_snapshot_endpoint: "/runtime_snapshot"

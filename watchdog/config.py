@@ -8,6 +8,9 @@ from typing import List
 
 @dataclass
 class WatchdogConfig:
+    deploy_server_ip: str = ""
+    deploy_ssh_user: str = "Administrator"
+    deploy_remote_root: str = ""
     bridge_url: str = "http://localhost:8899"
     health_endpoint: str = "/healthz"
     runtime_snapshot_endpoint: str = "/runtime_snapshot"

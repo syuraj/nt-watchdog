@@ -82,6 +82,9 @@ class RecoveryManager:
         return False
 
     def _can_restart_now(self) -> bool:
+        return self._restart_cooldown_remaining() <= 0
+
+    def _restart_cooldown_remaining(self) -> int:
         restarts = self.runtime_state.get("restarts", [])
         if not isinstance(restarts, list):
             restarts = []
@@ -90,9 +93,12 @@ class RecoveryManager:
         if restarts:
             last = datetime.fromisoformat(restarts[-1].replace("Z", "+00:00"))
             elapsed = (datetime.now(timezone.utc) - last).total_seconds()
-            if elapsed < self.config.restart_cooldown_sec:
-                return False
-        return True
+            attempts = max(1, int(self.runtime_state.get("restart_recovery_attempts", 0) or 0))
+            base = max(1, int(self.config.restart_cooldown_sec))
+            cap = max(base, int(getattr(self.config, "recovery_retry_max_sec", 1800) or 1800))
+            cooldown = min(base * (2 ** min(attempts - 1, 30)), cap)
+            return max(0, math.ceil(cooldown - elapsed))
+        return 0
 
     def _mark_restart(self) -> None:
         restarts = self.runtime_state.get("restarts", [])
@@ -101,6 +107,9 @@ class RecoveryManager:
         restarts = self.state_store.prune_restart_history(restarts)
         restarts.append(_utc_now())
         self.runtime_state["restarts"] = restarts
+        self.runtime_state["restart_recovery_attempts"] = int(
+            self.runtime_state.get("restart_recovery_attempts", 0) or 0
+        ) + 1
         self._persist_runtime()
 
     def _notify(
@@ -437,6 +446,7 @@ class RecoveryManager:
         reason_str = ",".join(reasons) if isinstance(reasons, list) else str(reasons)
 
         if status == "ok":
+            self.runtime_state["restart_recovery_attempts"] = 0
             prior_incident = self.runtime_state.get("last_incident_id", "")
             self.runtime_state["reconnect_failures"] = 0
             self.runtime_state.pop("bridge_unreachable_failures", None)
@@ -660,18 +670,22 @@ class RecoveryManager:
             return result
 
         if not self._can_restart_now():
-            return self._degraded_notify(
+            result = self._degraded_notify(
                 event_type="restart_blocked",
                 status=status,
                 reason="restart_circuit_breaker_open",
                 incident_id=incident_id,
             )
+            result["sleep_override_sec"] = max(1, self._restart_cooldown_remaining())
+            return result
 
         restart_reason = f"reconnect_attempt_{failures}_failed_restart"
+        # Count every restart attempt, including launches that fail. A process
+        # launch alone does not mean the connection incident recovered.
+        self._mark_restart()
         restarted = self.process_manager.restart(startup_grace_sec=self.config.startup_grace_sec)
         if restarted:
             self.runtime_state["reconnect_failures"] = 0
-            self._mark_restart()
             restore_meta = self._enable_strategies_after_startup(
                 reason=restart_reason,
                 bridge_wait_sec=max(30, int(self.config.startup_grace_sec)),

@@ -66,6 +66,12 @@ Optional env overrides:
 - trigger startup now (without relogin):
   - `python scripts/manage_watchdog.py trigger-startup`
 
+## Production Watchdog Deployment
+- Set `deploy_server_ip`, `deploy_ssh_user`, and `deploy_remote_root` in `config.yaml`.
+- Deploy from the repository root: `python scripts/manage_watchdog.py deploy`
+- Preview the production target and file set: `python scripts/manage_watchdog.py deploy --dry-run`
+- The Python command runs local checks and transfers the recovery source, state store, regression test, and PowerShell deploy helper. The `.ps1` backs up the production files, stops the watchdog if it is running, verifies copied hashes, and runs compile and recovery tests on the VPS. It restarts the watchdog only if it was running before deployment and restores the backed-up files if verification fails. It does not restart NinjaTrader.
+
 ## RDP Disconnect Handler
 Scheduled task triggered on TerminalServices Event ID 24 runs `tscon /dest:console` to re-attach the disconnected session, keeping WPF/Direct3D rendering alive. Install via step 3 above. Remove with `python scripts/manage_watchdog.py remove-rdp-handler`. Log: `watchdog/logs/rdp_handler.log`.
 

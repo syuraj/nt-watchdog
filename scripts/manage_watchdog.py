@@ -105,6 +105,27 @@ def cmd_run(args: argparse.Namespace) -> None:
     subprocess.run(cmd, check=True)
 
 
+def cmd_deploy(args: argparse.Namespace) -> None:
+    root = project_root()
+    config_path = Path(args.config) if args.config else root / "config.yaml"
+    deploy_script = root / "scripts" / "deploy_watchdog_prod.py"
+    command = [sys.executable, str(deploy_script), "--config", str(config_path)]
+    if args.host:
+        command += ["--host", args.host]
+    if args.remote_root:
+        command += ["--remote-root", args.remote_root]
+    if args.dry_run:
+        command.append("--dry-run")
+
+    proc = run(command, check=False)
+    if proc.stdout:
+        print(proc.stdout, end="")
+    if proc.stderr:
+        print(proc.stderr, end="", file=sys.stderr)
+    if proc.returncode != 0:
+        raise RuntimeError(f"Deployment command failed with exit code {proc.returncode}.")
+
+
 def cmd_smoke_test(args: argparse.Namespace) -> None:
     root = project_root()
     py = venv_python(root)
@@ -493,6 +514,13 @@ def build_parser() -> argparse.ArgumentParser:
     s_run.add_argument("--config", default="")
     s_run.add_argument("--max-cycles", type=int, default=0)
     s_run.set_defaults(func=cmd_run)
+
+    s_deploy = sub.add_parser("deploy", help="Preview or deploy watchdog code to the configured production host.")
+    s_deploy.add_argument("--config", default="", help="Config file containing the production deployment target.")
+    s_deploy.add_argument("--host", default="", help="Optional SSH target override (user@host).")
+    s_deploy.add_argument("--remote-root", default="", help="Optional production checkout path override.")
+    s_deploy.add_argument("--dry-run", action="store_true", help="Preview the target and files without deploying.")
+    s_deploy.set_defaults(func=cmd_deploy)
 
     s_smoke = sub.add_parser("smoke-test", help="Run mock bridge smoke test.")
     s_smoke.add_argument("--mock-port", type=int, default=18999)
