@@ -92,6 +92,12 @@ class RecoveryManager:
         self.runtime_state["restarts"] = restarts
         if restarts:
             last = datetime.fromisoformat(restarts[-1].replace("Z", "+00:00"))
+            completed = self.runtime_state.get("last_restart_completed_utc")
+            if isinstance(completed, str) and completed:
+                try:
+                    last = max(last, datetime.fromisoformat(completed.replace("Z", "+00:00")))
+                except ValueError:
+                    pass
             elapsed = (datetime.now(timezone.utc) - last).total_seconds()
             attempts = max(1, int(self.runtime_state.get("restart_recovery_attempts", 0) or 0))
             base = max(1, int(self.config.restart_cooldown_sec))
@@ -110,6 +116,10 @@ class RecoveryManager:
         self.runtime_state["restart_recovery_attempts"] = int(
             self.runtime_state.get("restart_recovery_attempts", 0) or 0
         ) + 1
+        self._persist_runtime()
+
+    def _mark_restart_completed(self) -> None:
+        self.runtime_state["last_restart_completed_utc"] = _utc_now()
         self._persist_runtime()
 
     def _notify(
@@ -447,6 +457,7 @@ class RecoveryManager:
 
         if status == "ok":
             self.runtime_state["restart_recovery_attempts"] = 0
+            self.runtime_state.pop("last_restart_completed_utc", None)
             prior_incident = self.runtime_state.get("last_incident_id", "")
             self.runtime_state["reconnect_failures"] = 0
             self.runtime_state.pop("bridge_unreachable_failures", None)
@@ -583,6 +594,19 @@ class RecoveryManager:
             )
             return result
 
+        # A launched NT process is not recovery. Wait for the full restart-round
+        # cooldown before starting another reconnect/restart sequence.
+        if self.runtime_state.get("restart_recovery_attempts", 0) and self.runtime_state.get("last_restart_completed_utc"):
+            remaining = self._restart_cooldown_remaining()
+            if remaining > 0:
+                return {
+                    "state": "degraded",
+                    "action": "restart_backoff_wait",
+                    "reason": "restart_recovery_backoff",
+                    "incident_id": incident_id,
+                    "sleep_override_sec": remaining,
+                }
+
         attempt = self._attempt_reconnect(runtime_snapshot)
         reconnect_ok = attempt["success"]
         if attempt["bridge_unreachable"]:
@@ -657,7 +681,7 @@ class RecoveryManager:
                     "reason": f"attempt_{failures}_failed",
                     "next_retry_sec": sleep_override,
                 },
-                dedupe_key="reconnect_retrying",
+                dedupe_key=f"incident_failure:{incident_id}",
             )
             result = {
                 "state": "degraded",
@@ -705,14 +729,17 @@ class RecoveryManager:
                     "strategies_active": restore_meta["strategies_active"],
                 }
             )
+            self._mark_restart_completed()
+            recovered = bool(restore_meta["bridge_up"] and restore_meta["strategies_active"])
             notify_meta = self._notify(
-                "restart_success",
+                "restart_success" if recovered else "restart_pending",
                 {
                     "status": "recovering",
                     "action": "restart_nt",
                     "reason": restart_reason,
                     "strategies_toggled": restore_meta["strategies_toggled"],
                 },
+                dedupe_key="restart_success" if recovered else f"incident_failure:{incident_id}",
             )
             result = {
                 "state": "recovering",
@@ -729,9 +756,11 @@ class RecoveryManager:
         self.state_store.append_event(
             {"kind": "restart", "status": "failed", "incident_id": incident_id, "reason": "process_restart_failed"}
         )
+        self._mark_restart_completed()
         notify_meta = self._notify(
             "restart_failed",
             {"status": "degraded", "action": "restart_nt", "reason": "process_restart_failed"},
+            dedupe_key=f"incident_failure:{incident_id}",
         )
         result = {
             "state": "degraded",

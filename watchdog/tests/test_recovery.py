@@ -226,6 +226,59 @@ class RecoveryTests(unittest.TestCase):
             manager.handle_cycle(health={"status": "ok", "reasons": []}, runtime_snapshot={})
             self.assertEqual(state.load_runtime_state()["restart_recovery_attempts"], 0)
 
+    def test_failed_restart_waits_before_new_reconnect_round_and_dedupes_alerts(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._build_config(td)
+            cfg.restart_cooldown_sec = 120
+            cfg.recovery_retry_max_sec = 600
+            cfg.notification_cooldown_sec = 3600
+            cfg.reconnect_attempt_limit = 2
+            state = StateStore(cfg)
+            bridge = FakeBridge([{"success": False, "error": "not connected"}] * 3)
+            process = FakeProcessManager()
+            notifier = FakeNotifier()
+            manager = self._make_manager(
+                config=cfg,
+                bridge=bridge,  # type: ignore[arg-type]
+                process_manager=process,
+                state_store=state,
+                notifier=notifier,  # type: ignore[arg-type]
+            )
+            manager._enable_strategies_after_startup = lambda **kwargs: {
+                "bridge_up": False,
+                "strategies_active": False,
+                "strategies_toggled": 0,
+            }
+            health = {"status": "degraded", "reasons": ["all_connections_down"]}
+
+            first = manager.handle_cycle(health=health, runtime_snapshot={"positions": []})
+            self.assertEqual(first["action"], "reconnect_retry_wait")
+            restarted = manager.handle_cycle(health=health, runtime_snapshot={"positions": []})
+            self.assertEqual(restarted["action"], "restart_nt")
+            self.assertEqual(notifier.events[0]["event_type"], "reconnect_retrying")
+            self.assertTrue(restarted["alert_skipped"])
+            self.assertEqual(state.load_runtime_state()["restart_recovery_attempts"], 1)
+
+            waiting = manager.handle_cycle(health=health, runtime_snapshot={"positions": []})
+            self.assertEqual(waiting["action"], "restart_backoff_wait")
+            self.assertGreaterEqual(waiting["sleep_override_sec"], 119)
+            self.assertEqual(bridge.calls, 2)
+            self.assertEqual(process.restart_calls, 1)
+            self.assertEqual(len(notifier.events), 1)
+
+            runtime = state.load_runtime_state()
+            runtime["last_restart_completed_utc"] = "2000-01-01T00:00:00Z"
+            runtime["restarts"] = ["2000-01-01T00:00:00Z"]
+            state.save_runtime_state(runtime)
+            manager.handle_cycle(health=health, runtime_snapshot={"positions": []})
+            second = manager.handle_cycle(health=health, runtime_snapshot={"positions": []})
+            self.assertEqual(second["action"], "restart_nt")
+            self.assertEqual(process.restart_calls, 2)
+            self.assertTrue(second["alert_skipped"])
+            waiting_again = manager.handle_cycle(health=health, runtime_snapshot={"positions": []})
+            self.assertGreaterEqual(waiting_again["sleep_override_sec"], 239)
+            self.assertEqual(len(notifier.events), 1)
+
     def test_stuck_triggers_rdp_redirect_before_reconnect(self) -> None:
         """When /healthz reports main_thread_unresponsive, watchdog should try
         to redirect the disconnected RDP session to console BEFORE calling
